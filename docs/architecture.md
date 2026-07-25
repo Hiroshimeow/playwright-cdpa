@@ -48,6 +48,10 @@ Lifecycle rules:
 - If the exact target no longer exists, such as after browser restart or prior cleanup, the record is marked closed without touching another page.
 - `keep-helper-tab` is durable request policy; later recovery does not override it.
 - Concurrent cleanup uses record revisions and is idempotent.
+- Schema-v4 helper fields are decoded before any browser lifecycle decision. `helper_page_keep` must be exactly a JSON boolean; target ID must be null or 1–256 printable ASCII characters without spaces; close time must be null or a bounded timezone-aware ISO timestamp.
+- All three schema-v4 helper fields are required. A keep policy or close timestamp without a target ID is corrupt state.
+- Schema-v2/v3 records receive no helper ownership, even if untrusted extra helper fields are present; the core never invents a durable target during migration.
+- Any malformed helper lifecycle record raises `CorruptStateError` before CDP connection, page closure, cleanup marking, or conversation ownership mutation.
 
 A normal Playwright timeout/error before `CLICK_BOUNDARY_ENTERED` is classified as an external timeout/network failure. The exact claim is released because no Send can have occurred. Failures after the click boundary remain ambiguous and retain ownership.
 
@@ -106,7 +110,7 @@ Logging/observation fingerprints are independent from final-candidate resolution
 
 ## Persistence and ownership
 
-- Turn and conversation state use strict versioned JSON schemas. Turn schema v4 adds exact helper-page target ownership and migrates schema v2/v3 records with no guessed helper identity.
+- Turn and conversation state use strict versioned JSON schemas. Turn schema v4 adds exact helper-page target ownership, exact-type and cross-field validation, and migrates schema v2/v3 records with no guessed helper identity.
 - Writes use a temporary file in the same directory, file `fsync`, `os.replace`, then parent-directory `fsync`.
 - Turn and conversation records carry monotonically increasing revisions. A public request ID is create-only and can never overwrite an existing record.
 - Record updates are serialized with `fcntl.flock`.

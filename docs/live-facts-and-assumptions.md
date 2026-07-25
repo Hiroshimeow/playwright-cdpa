@@ -54,3 +54,12 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - A fresh post-fix Send returned exact `DEV3_OK`, exit 0, stderr 0 bytes. Its schema-v4 record contained a helper target ID, `DURABLE_HANDOFF`, and a non-null helper close timestamp. A subsequent CDP enumeration found zero open pages matching that persisted target ID.
 - Regression tests using real Playwright `TimeoutError` and `Error` classes prove that pre-click failures become external timeout/network failures, close their helper, release the claim, and allow a new request to claim the same conversation.
 - A protocol-fake integration proves frontend acceptance followed by backend HTTP 429 leaves one exact helper open, then `watch` recovery closes that target only, leaves an unrelated page open, completes the turn, and releases ownership.
+
+
+## DEV turn 4 strict-state facts
+
+- Schema-v4 helper lifecycle values are no longer coerced. Malformed JSON types and invalid cross-field combinations are rejected as corrupt state.
+- `watch` and `cancel` regression harnesses prove corrupt helper state is rejected before `BrowserSession` construction, page closure, durable close marking, or conversation claim mutation.
+- A CLI corrupt-record proof returned exit 20 with category `corrupt_state`; the raw turn file and active conversation record were byte/field unchanged and stderr was empty.
+- Schema-v2/v3 records cannot gain helper ownership from injected newer fields. Migration resets helper target to null, keep policy to false, and close marker to null.
+- An existing valid schema-v4 request still rewatched successfully with exact response `DEV3_OK` after strict decoding was enabled.

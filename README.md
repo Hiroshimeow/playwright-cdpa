@@ -153,7 +153,7 @@ Default: `.playwright-gpt/`
 └── locks/*.lock
 ```
 
-State schema v4 contains allowlisted identity, state-machine provenance, the exact Chromium helper target ID and keep/closed lifecycle, hashes, lengths, revisions, timestamps, and sanitized failures. It does not contain prompt bodies, response bodies, cookies, access tokens, authorization headers, or raw network payloads.
+State schema v4 contains allowlisted identity, state-machine provenance, the exact Chromium helper target ID and keep/closed lifecycle, hashes, lengths, revisions, timestamps, and sanitized failures. Helper lifecycle fields are decoded without coercion: keep policy must be an exact JSON boolean, target identity must be null or bounded printable ASCII, and the close marker must be null or a timezone-aware ISO timestamp. Invalid state fails as `corrupt_state` before CDP connection or browser mutation. State does not contain prompt bodies, response bodies, cookies, access tokens, authorization headers, or raw network payloads.
 
 ## Documentation
 

@@ -156,7 +156,7 @@ An initial cancellation implementation closed its helper page after leaving the 
 
 ```bash
 uv run pytest -ra
-# 69 passed, 5 xfailed in 2.26s
+# 93 passed, 5 xfailed
 
 uv build
 # dist/playwright_gpt_core-0.1.0.tar.gz
@@ -240,3 +240,54 @@ stderr: 0 bytes
 A separate live two-page target test confirmed that exact-target cleanup closed the owned page and did not close the unrelated page.
 
 Post-remediation compatibility runs passed on Python 3.11.15, 3.12.13, and 3.14.0. Python 3.10 was not installed on the host and was not downloaded or installed during this task.
+
+## DEV turn 4 strict helper-state remediation
+
+TEST found that schema-v4 helper fields were being coerced with `str(...)` and `bool(...)`. That could turn `"false"` into an enabled keep policy, convert arrays into false, accept numeric target IDs, or treat a numeric close marker as proof that cleanup already happened.
+
+The decoder now rejects malformed state before service orchestration:
+
+```text
+helper_page_keep: exact JSON boolean only
+helper_page_target_id: null or 1–256 printable ASCII characters without spaces
+helper_page_closed_at: null or bounded timezone-aware ISO timestamp
+closed timestamp without target ID: rejected
+keep=true without target ID: rejected
+missing schema-v4 helper field: rejected
+schema-v2/v3 injected helper fields: ignored; no ownership is inferred
+```
+
+StateStore regressions cover strings, integers, null, arrays, objects, empty/oversized/control-character target IDs, invalid/naive timestamps, missing fields, and cross-field violations. Service regressions cover both `watch` and `cancel` and prove:
+
+```text
+raised error: CorruptStateError
+BrowserSession constructed: no
+page close attempted: no
+turn file changed: no
+conversation claim changed: no
+```
+
+CLI-level evidence used a malformed terminal record with an active conversation claim:
+
+```text
+command: playwright-gpt watch <corrupt-request> --json
+exit: 20
+failure category: corrupt_state
+raw turn record unchanged: yes
+conversation claim unchanged: yes
+stderr: 0 bytes
+```
+
+A valid existing schema-v4 live record was rewatched after the strict decoder change:
+
+```text
+exit: 0
+response: DEV3_OK
+schema: 4
+helper_page_keep decoded type: bool
+helper_page_target_id decoded type: str
+helper_page_closed_at decoded type: str
+stderr: 0 bytes
+```
+
+Post-change compatibility passed on Python 3.11.15, 3.12.13, and 3.14.0. Python 3.10 remains unavailable on the host.
