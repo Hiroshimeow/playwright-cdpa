@@ -8,10 +8,14 @@ from .models import TurnIdentity
 
 _FIELDS = (
     "conversation_id",
+    "transport_turn_exchange_id",
+    "transport_request_id",
+    "stream_topic_id",
     "turn_exchange_id",
     "request_id",
-    "stream_topic_id",
+    "working_turn_id",
     "user_message_id",
+    "frontend_parent_message_id",
     "parent_message_id",
     "pre_send_current_node",
 )
@@ -45,7 +49,7 @@ def discover_user_identity(
     if not isinstance(mapping, dict) or not isinstance(current, str) or current not in mapping:
         raise IdentityMissingError("graph has no valid current branch")
     chain = _current_chain(mapping, current)
-    candidates: list[tuple[str, dict[str, Any]]] = []
+    candidates: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     for node_id in chain:
         if node_id in baseline_node_ids:
             continue
@@ -62,39 +66,36 @@ def discover_user_identity(
         message_id = str(message.get("id") or node_id)
         if identity.user_message_id and message_id != identity.user_message_id:
             continue
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        _validate_present_correlation(metadata, identity)
         if prompt is not None and content_text(message.get("content")) != prompt:
             continue
-        candidates.append((message_id, node))
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        candidates.append((message_id, node, metadata))
     if not candidates:
         raise IdentityMissingError("submitted user node not found on current branch")
     if len(candidates) != 1:
         raise AmbiguousIdentityError(
             f"multiple submitted user candidates: {[candidate[0] for candidate in candidates]}"
         )
-    message_id, node = candidates[0]
+    message_id, node, metadata = candidates[0]
     parent = node.get("parent")
-    if identity.parent_message_id is not None and str(parent) != identity.parent_message_id:
-        raise ConflictingIdentityError("submitted user parent conflicts with transport identity")
     if identity.pre_send_current_node is not None and str(parent) != identity.pre_send_current_node:
-        raise ConflictingIdentityError("submitted user node does not descend from pre-Send anchor")
-    return merge_identity(
-        identity,
-        TurnIdentity(
-            user_message_id=message_id,
-            parent_message_id=str(parent) if parent is not None else None,
-        ),
-        source="graph-user",
+        raise ConflictingIdentityError(
+            "submitted user node does not descend from pre-Send graph anchor"
+        )
+    graph_identity = TurnIdentity(
+        user_message_id=message_id,
+        parent_message_id=str(parent) if parent is not None else None,
+        turn_exchange_id=_optional_string(metadata.get("turn_exchange_id")),
+        request_id=_optional_string(metadata.get("request_id")),
+        working_turn_id=_optional_string(metadata.get("working_turn_id")),
     )
+    if not graph_identity.has_graph_correlation:
+        raise IdentityMissingError("submitted user node has no graph turn correlation")
+    return merge_identity(identity, graph_identity, source="graph-user")
 
 
-def _validate_present_correlation(metadata: dict[str, Any], identity: TurnIdentity) -> None:
-    for field in ("turn_exchange_id", "request_id"):
-        expected = getattr(identity, field)
-        present = metadata.get(field)
-        if expected is not None and present is not None and str(present) != expected:
-            raise ConflictingIdentityError(f"user node {field} conflicts with transport identity")
+def _optional_string(value: Any) -> str | None:
+    return str(value) if value is not None and str(value) else None
 
 
 def _current_chain(mapping: dict[str, Any], current: str) -> list[str]:

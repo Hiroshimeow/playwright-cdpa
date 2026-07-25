@@ -57,29 +57,45 @@ _ALLOWED_TRANSITIONS: dict[TurnState, frozenset[TurnState]] = {
 @dataclass(frozen=True, slots=True)
 class TurnIdentity:
     conversation_id: str | None = None
+    transport_turn_exchange_id: str | None = None
+    transport_request_id: str | None = None
+    stream_topic_id: str | None = None
     turn_exchange_id: str | None = None
     request_id: str | None = None
-    stream_topic_id: str | None = None
+    working_turn_id: str | None = None
     user_message_id: str | None = None
+    frontend_parent_message_id: str | None = None
     parent_message_id: str | None = None
     pre_send_current_node: str | None = None
     sources: dict[str, str] = field(default_factory=dict)
 
     @property
-    def has_turn_correlation(self) -> bool:
-        return bool(self.turn_exchange_id or self.request_id or self.stream_topic_id)
+    def has_transport_correlation(self) -> bool:
+        return bool(self.transport_turn_exchange_id or self.transport_request_id or self.stream_topic_id)
+
+    @property
+    def has_graph_correlation(self) -> bool:
+        return bool(self.turn_exchange_id or self.request_id or self.working_turn_id)
 
     @property
     def monitorable(self) -> bool:
-        return bool(self.conversation_id and self.user_message_id and self.has_turn_correlation)
+        return bool(
+            self.conversation_id
+            and self.user_message_id
+            and self.has_graph_correlation
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "conversation_id": self.conversation_id,
+            "transport_turn_exchange_id": self.transport_turn_exchange_id,
+            "transport_request_id": self.transport_request_id,
+            "stream_topic_id": self.stream_topic_id,
             "turn_exchange_id": self.turn_exchange_id,
             "request_id": self.request_id,
-            "stream_topic_id": self.stream_topic_id,
+            "working_turn_id": self.working_turn_id,
             "user_message_id": self.user_message_id,
+            "frontend_parent_message_id": self.frontend_parent_message_id,
             "parent_message_id": self.parent_message_id,
             "pre_send_current_node": self.pre_send_current_node,
             "sources": dict(self.sources),
@@ -93,15 +109,20 @@ class TurnIdentity:
             raise ValueError("identity must be an object")
         names = (
             "conversation_id",
+            "transport_turn_exchange_id",
+            "transport_request_id",
+            "stream_topic_id",
             "turn_exchange_id",
             "request_id",
-            "stream_topic_id",
+            "working_turn_id",
             "user_message_id",
+            "frontend_parent_message_id",
             "parent_message_id",
             "pre_send_current_node",
         )
         fields: dict[str, Any] = {
-            name: (str(value[name]) if value.get(name) is not None else None) for name in names
+            name: (str(value[name]) if value.get(name) is not None else None)
+            for name in names
         }
         raw_sources = value.get("sources")
         fields["sources"] = (
@@ -159,7 +180,7 @@ class TurnRecord:
             raise ValueError("conversation target requires target_conversation_id")
         now = utc_now()
         return cls(
-            schema_version=2,
+            schema_version=3,
             request_id=request_id,
             state=TurnState.NEW,
             send_provenance=SendProvenance.NOT_ATTEMPTED,
@@ -237,7 +258,7 @@ class TurnRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": self.schema_version,
+            "schema_version": 3,
             "request_id": self.request_id,
             "state": self.state.value,
             "send_provenance": self.send_provenance.value,
@@ -260,7 +281,8 @@ class TurnRecord:
     def from_dict(cls, value: dict[str, Any]) -> TurnRecord:
         from .errors import FailureCategory
 
-        if value.get("schema_version") != 2:
+        raw_schema = value.get("schema_version")
+        if raw_schema not in {2, 3}:
             raise ValueError("unsupported turn record schema")
         raw_failure = value.get("failure")
         failure = None
@@ -276,8 +298,37 @@ class TurnRecord:
         raw_baseline = value.get("baseline_node_fingerprints")
         if not isinstance(raw_baseline, dict):
             raise ValueError("baseline_node_fingerprints must be an object")
+        raw_identity = value.get("identity")
+        if raw_schema == 2 and isinstance(raw_identity, dict):
+            migrated = dict(raw_identity)
+            old_turn = migrated.pop("turn_exchange_id", None)
+            old_request = migrated.pop("request_id", None)
+            old_parent = migrated.pop("parent_message_id", None)
+            migrated["transport_turn_exchange_id"] = old_turn
+            migrated["transport_request_id"] = old_request
+            migrated["frontend_parent_message_id"] = old_parent
+            migrated["turn_exchange_id"] = None
+            migrated["request_id"] = None
+            migrated["working_turn_id"] = None
+            migrated["parent_message_id"] = None
+            raw_sources = migrated.get("sources")
+            sources = dict(raw_sources) if isinstance(raw_sources, dict) else {}
+            if old_turn is not None:
+                sources["transport_turn_exchange_id"] = sources.pop(
+                    "turn_exchange_id", "schema-2-migration"
+                )
+            if old_request is not None:
+                sources["transport_request_id"] = sources.pop(
+                    "request_id", "schema-2-migration"
+                )
+            if old_parent is not None:
+                sources["frontend_parent_message_id"] = sources.pop(
+                    "parent_message_id", "schema-2-migration"
+                )
+            migrated["sources"] = sources
+            raw_identity = migrated
         return cls(
-            schema_version=2,
+            schema_version=3,
             request_id=str(value["request_id"]),
             state=TurnState(str(value["state"])),
             send_provenance=SendProvenance(str(value["send_provenance"])),
@@ -289,7 +340,7 @@ class TurnRecord:
                 if value.get("target_conversation_id") is not None
                 else None
             ),
-            identity=TurnIdentity.from_dict(value.get("identity")),
+            identity=TurnIdentity.from_dict(raw_identity),
             baseline_node_fingerprints={str(k): str(v) for k, v in raw_baseline.items()},
             revision=int(value["revision"]),
             created_at=str(value["created_at"]),

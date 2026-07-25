@@ -187,18 +187,15 @@ class GraphResolver:
             metadata = (
                 message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
             )
-            for field in ("turn_exchange_id", "request_id"):
+            for field in ("turn_exchange_id", "request_id", "working_turn_id"):
                 expected = getattr(self.identity, field)
                 present = metadata.get(field)
                 if expected is not None and present is not None:
                     if str(present) != expected:
                         raise ConflictingIdentityError(
-                            f"exact chain {field} conflicts with transport identity"
+                            f"exact chain {field} conflicts with canonical graph identity"
                         )
                     positive = True
-        # Transport evidence plus exact submitted message ancestry is itself deterministic.
-        if self.identity.has_turn_correlation:
-            positive = True
         if not positive:
             raise IdentityMissingError("exact chain has no positive turn correlation")
 

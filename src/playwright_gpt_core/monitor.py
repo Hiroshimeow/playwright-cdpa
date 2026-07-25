@@ -41,7 +41,7 @@ async def monitor_snapshots(
         status = raw_status.upper()
         if status in {"FAILED", "ERROR", "CANCELLED", "CANCELED"}:
             raise BackendError(f"turn ended with backend status {status}")
-        if status != "COMPLETE":
+        if status not in {"COMPLETE", "COMPLETED"}:
             continue
         complete_seen = True
         try:
@@ -87,7 +87,7 @@ async def monitor_live(
             raise BackendError(f"turn ended with backend status {status}")
         if status in {"CANCELLED", "CANCELED"}:
             raise BackendError("turn was cancelled")
-        if status == "COMPLETE":
+        if status in {"COMPLETE", "COMPLETED"}:
             complete_seen = True
             if snapshot.graph is not None:
                 try:

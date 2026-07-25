@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from playwright_gpt_core.errors import SchemaDriftError
+from playwright_gpt_core.transport import (
+    FrontendAcceptance,
+    parse_sse_events,
+    reduce_handoff,
+    reduce_request_payload,
+)
+
+
+class FakeRequest:
+    def __init__(self, payload: dict) -> None:
+        self.post_data = json.dumps(payload)
+
+
+def test_request_reduction_extracts_only_identity_fields() -> None:
+    reduced = reduce_request_payload(
+        FakeRequest(
+            {
+                "model": "gpt-test",
+                "thinking_effort": "high",
+                "parent_message_id": "parent-1",
+                "metadata": {"request_id": "req-1", "secret_token": "do-not-copy"},
+                "messages": [
+                    {
+                        "id": "user-1",
+                        "author": {"role": "user"},
+                        "content": {"parts": ["secret prompt"]},
+                    }
+                ],
+            }
+        )
+    )
+    assert reduced.request_id == "req-1"
+    assert reduced.user_message_id == "user-1"
+    assert reduced.frontend_parent_message_id == "parent-1"
+    assert "secret" not in repr(reduced)
+
+
+def test_handoff_reduction_requires_conversation_and_turn_correlation() -> None:
+    acceptance = FrontendAcceptance(200, "req-1", "user-1", "parent-1", None, None)
+    text = "\n".join(
+        [
+            'data: {"type":"message","conversation_id":"conv-1","turn_exchange_id":"turn-1"}',
+            'data: {"type":"stream","options":[{"topic_id":"topic-1"}]}',
+            "data: [DONE]",
+        ]
+    )
+    handoff = reduce_handoff(text, acceptance)
+    assert handoff.identity.conversation_id == "conv-1"
+    assert handoff.identity.user_message_id == "user-1"
+    assert handoff.event_types == ("message", "stream")
+
+
+def test_conflicting_sse_identity_fails_closed() -> None:
+    acceptance = FrontendAcceptance(200, "req-1", "user-1", None, None, None)
+    text = "\n".join(
+        [
+            'data: {"conversation_id":"conv-a"}',
+            'data: {"conversation_id":"conv-b"}',
+        ]
+    )
+    with pytest.raises(SchemaDriftError):
+        reduce_handoff(text, acceptance)
+
+
+def test_sse_parser_ignores_malformed_and_done() -> None:
+    assert parse_sse_events('data: nope\ndata: {"type":"ok"}\ndata: [DONE]') == [
+        {"type": "ok"}
+    ]
