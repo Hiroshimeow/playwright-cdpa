@@ -46,3 +46,11 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - Prompt bodies are not persisted. Restart reconciliation therefore relies on durable identity and graph structure, not prompt text.
 - Response bodies are not persisted. `watch` can re-read the exact graph response; `get` returns metadata only.
 - A Stop click does not prove backend or tool cancellation.
+
+## DEV turn 3 remediation facts
+
+- Page-scoped `Target.getTargetInfo` returned a stable Chromium target ID in the existing CDP 9222 session.
+- A live exact-target cleanup created two temporary pages, closed only the persisted owned target, left the unrelated target open, and recorded a durable close timestamp. Both temporary pages were removed before detaching.
+- A fresh post-fix Send returned exact `DEV3_OK`, exit 0, stderr 0 bytes. Its schema-v4 record contained a helper target ID, `DURABLE_HANDOFF`, and a non-null helper close timestamp. A subsequent CDP enumeration found zero open pages matching that persisted target ID.
+- Regression tests using real Playwright `TimeoutError` and `Error` classes prove that pre-click failures become external timeout/network failures, close their helper, release the claim, and allow a new request to claim the same conversation.
+- A protocol-fake integration proves frontend acceptance followed by backend HTTP 429 leaves one exact helper open, then `watch` recovery closes that target only, leaves an unrelated page open, completes the turn, and releases ownership.

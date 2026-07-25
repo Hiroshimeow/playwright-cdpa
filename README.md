@@ -16,6 +16,7 @@ The core uses the real ChatGPT composer and the real Send/Stop controls. It obse
 - Keeps access tokens and authorization headers in memory only.
 - Persists prompt digest and length, not prompt body.
 - Uses atomic JSON replacement, file and directory `fsync`, record revisions, and POSIX file locks.
+- Persists the exact Chromium helper target ID and keep/closed policy; recovery never closes a tab by URL matching.
 
 ## Install
 
@@ -152,7 +153,7 @@ Default: `.playwright-gpt/`
 └── locks/*.lock
 ```
 
-State contains allowlisted identity, state-machine provenance, hashes, lengths, revisions, timestamps, and sanitized failures. It does not contain prompt bodies, response bodies, cookies, access tokens, authorization headers, or raw network payloads.
+State schema v4 contains allowlisted identity, state-machine provenance, the exact Chromium helper target ID and keep/closed lifecycle, hashes, lengths, revisions, timestamps, and sanitized failures. It does not contain prompt bodies, response bodies, cookies, access tokens, authorization headers, or raw network payloads.
 
 ## Documentation
 

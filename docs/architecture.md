@@ -4,7 +4,7 @@
 
 | Module | Responsibility |
 |---|---|
-| `connection.py` | Loopback CDP validation, attach, Playwright detach |
+| `connection.py` | Loopback CDP validation, attach/detach, exact Chromium page-target identity and closure |
 | `frontend.py` | Authentication readiness and real composer/Send/Stop controls |
 | `transport.py` | Passive observation and allowlisted frontend handoff reduction |
 | `backend.py` | Authenticated read-only status and graph GETs |
@@ -35,6 +35,21 @@ The Send sequence is deliberately ordered:
 12. Monitor the exact graph turn to convergence.
 
 Once step 5 is durable, automatic resend is prohibited unless a separate future policy proves retry safety. Process restart does not reinterpret an uncertain Send as unsent.
+
+## Helper-page ownership
+
+Immediately after creating a helper page, the core reads `Target.getTargetInfo` through a page-scoped CDP session and persists the exact Chromium target ID in turn-record schema v4. It also persists whether the original Send requested `keep-helper-tab` and whether the helper has been closed.
+
+Lifecycle rules:
+
+- A pre-click failure closes its owned helper while Playwright is still attached and releases the conversation claim.
+- A post-click request without durable graph handoff retains the exact helper and its durable target ID.
+- After `watch`, recovery, or cancellation proves an exact terminal turn, the core closes only the page whose target ID matches the durable record. It never closes by conversation URL, visible title, page ordering, or a single-page assumption.
+- If the exact target no longer exists, such as after browser restart or prior cleanup, the record is marked closed without touching another page.
+- `keep-helper-tab` is durable request policy; later recovery does not override it.
+- Concurrent cleanup uses record revisions and is idempotent.
+
+A normal Playwright timeout/error before `CLICK_BOUNDARY_ENTERED` is classified as an external timeout/network failure. The exact claim is released because no Send can have occurred. Failures after the click boundary remain ambiguous and retain ownership.
 
 ## Identity namespaces
 
@@ -91,7 +106,7 @@ Logging/observation fingerprints are independent from final-candidate resolution
 
 ## Persistence and ownership
 
-- Turn and conversation state use strict versioned JSON schemas.
+- Turn and conversation state use strict versioned JSON schemas. Turn schema v4 adds exact helper-page target ownership and migrates schema v2/v3 records with no guessed helper identity.
 - Writes use a temporary file in the same directory, file `fsync`, `os.replace`, then parent-directory `fsync`.
 - Turn and conversation records carry monotonically increasing revisions. A public request ID is create-only and can never overwrite an existing record.
 - Record updates are serialized with `fcntl.flock`.

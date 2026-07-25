@@ -156,7 +156,7 @@ An initial cancellation implementation closed its helper page after leaving the 
 
 ```bash
 uv run pytest -ra
-# 59 passed, 5 xfailed in 1.69s
+# 69 passed, 5 xfailed in 2.26s
 
 uv build
 # dist/playwright_gpt_core-0.1.0.tar.gz
@@ -178,3 +178,65 @@ request.post()/put()/patch()/delete()
 ## Remaining externally blocked proof
 
 A backend status explicitly representing hard cancellation was not observed in this session. The real Stop control was exercised during active text and tool execution, but the backend either produced an exact final or left cancellation unproven. The implementation therefore supports and reports cancellation honestly, but cannot claim live proof of hard backend cancellation.
+
+## DEV turn 3 ownership and helper-lifecycle remediation
+
+TEST returned the implementation for two defects. Both were corrected on the same feature branch.
+
+### Pre-click Playwright failure
+
+Regression coverage invokes real Playwright `TimeoutError` and `Error` exception classes from `page.goto()` before the click boundary. Verified outcomes:
+
+```text
+state: FAILED
+timeout category: timeout, external, retryable
+generic Playwright category: network, external, retryable
+conversation active_request_id: null
+helper close timestamp: present
+next request can claim the same conversation: yes
+```
+
+The claim-release decision now depends on `click_entered == false`, not on which exception hierarchy was raised. After the irreversible boundary, the claim remains fail-closed.
+
+### Durable exact helper identity
+
+Turn-record schema v4 persists:
+
+```text
+helper_page_target_id
+helper_page_keep
+helper_page_closed_at
+```
+
+Cleanup uses page-scoped CDP `Target.getTargetInfo`. URL matching is not used. Protocol-fake integration covers:
+
+```text
+frontend accepted
+backend GET HTTP 429 during graph identity binding
+state UNKNOWN / RETRY_PROHIBITED
+owned helper remains open
+watch exact recovery succeeds
+owned target closes
+unrelated target remains open
+helper close timestamp persists
+conversation claim releases
+```
+
+### Fresh live proof after the correction
+
+```text
+prompt: Reply with exactly DEV3_OK
+exit: 0
+response: DEV3_OK
+state: COMPLETE
+provenance: DURABLE_HANDOFF
+turn schema: 4
+helper target persisted: yes
+helper close timestamp persisted: yes
+open pages matching persisted target after completion: 0
+stderr: 0 bytes
+```
+
+A separate live two-page target test confirmed that exact-target cleanup closed the owned page and did not close the unrelated page.
+
+Post-remediation compatibility runs passed on Python 3.11.15, 3.12.13, and 3.14.0. Python 3.10 was not installed on the host and was not downloaded or installed during this task.
