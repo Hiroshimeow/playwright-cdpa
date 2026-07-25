@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "playwright-gpt-core"
+version = "0.1.0"
+description = "Fail-closed ChatGPT Web execution core for persistent CDP Chromium"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["playwright>=1.52,<2"]
+
+[project.scripts]
+playwright-gpt = "playwright_gpt_core.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.25"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/playwright_gpt_core"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 96
