@@ -6,19 +6,26 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import Page
+from playwright.async_api import (
+    Error as PlaywrightError,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from .backend import AuthenticatedBackend
 from .config import CoreConfig
-from .connection import BrowserSession
+from .connection import BrowserSession, close_page_by_target_id, page_target_id
 from .errors import (
     AmbiguousOutcomeError,
     CancellationUnprovenError,
+    ConcurrentStateError,
     CoreError,
     Failure,
     FailureCategory,
     IdentityMissingError,
     InvalidInputError,
+    NetworkError,
+    OperationTimeoutError,
     OwnershipConflictError,
 )
 from .frontend import (
@@ -67,7 +74,11 @@ class ChatGPTCore:
             raise InvalidInputError("prompt must not be empty")
         if fresh == (conversation is not None):
             raise InvalidInputError("select exactly one send target: fresh or conversation")
-        conversation_id = normalize_conversation(conversation) if conversation is not None else None
+        conversation_id = (
+            normalize_conversation(conversation)
+            if conversation is not None
+            else None
+        )
         request_id = request_id or uuid.uuid4().hex
 
         if conversation_id is not None:
@@ -108,8 +119,18 @@ class ChatGPTCore:
 
     async def watch(self, request_id: str) -> Result:
         record = self.store.load(request_id)
-        if record.state == TurnState.CANCELLED:
-            return self._result(record)
+        if record.state in {TurnState.FAILED, TurnState.CANCELLED}:
+            try:
+                await self._cleanup_terminal_helper(request_id)
+            except CoreError as exc:
+                return Result(
+                    schema_version=1,
+                    request_id=record.request_id,
+                    state=record.state,
+                    identity=record.identity,
+                    failure=exc.as_failure(),
+                )
+            return self._result(self.store.load(request_id))
         identity = record.identity
         if identity is None or not identity.conversation_id:
             failure = IdentityMissingError(
@@ -135,15 +156,16 @@ class ChatGPTCore:
                     stable_samples=self.config.stable_samples,
                     stable_seconds=self.config.stable_seconds,
                 )
-            record = self.store.load(request_id)
-            if record.state != TurnState.COMPLETE:
-                record = self.store.save(
-                    record.with_response(candidate.text).transition(TurnState.COMPLETE),
-                    expected_revision=record.revision,
-                )
+                record = self.store.load(request_id)
+                if record.state != TurnState.COMPLETE:
+                    record = self.store.save(
+                        record.with_response(candidate.text).transition(TurnState.COMPLETE),
+                        expected_revision=record.revision,
+                    )
+                await self._close_owned_helper(session.context, request_id)
             if identity.conversation_id:
                 self._release_if_owned(identity.conversation_id, request_id, terminal=True)
-            return self._result(record, response=candidate.text)
+            return self._result(self.store.load(request_id), response=candidate.text)
         except CoreError as exc:
             return await self._record_watch_failure(record, exc)
 
@@ -156,7 +178,17 @@ class ChatGPTCore:
     async def cancel(self, request_id: str) -> Result:
         record = self.store.load(request_id)
         if record.terminal:
-            return self._result(record)
+            try:
+                await self._cleanup_terminal_helper(request_id)
+            except CoreError as exc:
+                return Result(
+                    schema_version=1,
+                    request_id=record.request_id,
+                    state=record.state,
+                    identity=record.identity,
+                    failure=exc.as_failure(),
+                )
+            return self._result(self.store.load(request_id))
         record = self.store.save(
             record.request_cancellation(), expected_revision=record.revision
         )
@@ -193,6 +225,9 @@ class ChatGPTCore:
                         preflight.graph or {},
                     )
                     if terminal is not None:
+                        await self._close_owned_helper(
+                            session.context, request_id
+                        )
                         return terminal
                     page = await session.context.new_page()
                     try:
@@ -220,6 +255,9 @@ class ChatGPTCore:
                                 snapshot.graph or {},
                             )
                             if terminal is not None:
+                                await self._close_owned_helper(
+                                    session.context, request_id
+                                )
                                 return terminal
                             await asyncio.sleep(self.config.poll)
                         raise CancellationUnprovenError(
@@ -235,11 +273,18 @@ class ChatGPTCore:
             )
         except CoreError as exc:
             current = self.store.load(request_id)
-            if not current.terminal:
-                current = self.store.save(
-                    current.transition(TurnState.UNKNOWN, failure=exc.as_failure()),
-                    expected_revision=current.revision,
+            if current.terminal:
+                return Result(
+                    schema_version=1,
+                    request_id=current.request_id,
+                    state=current.state,
+                    identity=current.identity,
+                    failure=exc.as_failure(),
                 )
+            current = self.store.save(
+                current.transition(TurnState.UNKNOWN, failure=exc.as_failure()),
+                expected_revision=current.revision,
+            )
             return self._result(current)
         finally:
             if page is not None:
@@ -308,9 +353,7 @@ class ChatGPTCore:
         conversation_id: str | None,
     ) -> Result:
         claimed_conversation: str | None = None
-        page: Page | None = None
         click_entered = False
-        durable_handoff = False
         try:
             if conversation_id is not None:
                 with ConversationLock(
@@ -321,156 +364,181 @@ class ChatGPTCore:
 
             async with BrowserSession(self.config) as session:
                 assert session.context is not None
-                backend = AuthenticatedBackend(session.context)
-                page = await session.context.new_page()
-                target_url = (
-                    ORIGIN if conversation_id is None else conversation_url(conversation_id)
-                )
-                await page.goto(
-                    target_url, wait_until="domcontentloaded", timeout=60_000
-                )
-                await verify_authenticated(page)
-
-                baseline_graph: dict[str, Any] = {}
-                pre_send_current: str | None = None
-                if conversation_id is not None:
-                    snapshot = await backend.snapshot(conversation_id)
-                    if snapshot.stream_status.upper() not in _TERMINAL_STREAM:
-                        raise OwnershipConflictError(
-                            "conversation backend is active during locked preflight"
-                        )
-                    baseline_graph = snapshot.graph or {}
-                    current = baseline_graph.get("current_node")
-                    pre_send_current = str(current) if current is not None else None
-
-                partial = TurnIdentity(
-                    conversation_id=conversation_id,
-                    pre_send_current_node=pre_send_current,
-                    sources={
-                        key: "preflight"
-                        for key, value in (
-                            ("conversation_id", conversation_id),
-                            ("pre_send_current_node", pre_send_current),
-                        )
-                        if value is not None
-                    },
-                )
-                record = self.store.load(record.request_id)
-                record = self.store.save(
-                    record.transition(TurnState.PREPARING)
-                    .with_identity(partial)
-                    .with_baseline(graph_fingerprints(baseline_graph)),
-                    expected_revision=record.revision,
-                )
-                await fill_composer(page, prompt)
-                record = self.store.save(
-                    record.with_send_provenance(
-                        SendProvenance.CLICK_BOUNDARY_ENTERED
-                    ),
-                    expected_revision=record.revision,
-                )
-                click_entered = True
-
-                async def on_accepted(acceptance: FrontendAcceptance) -> None:
-                    nonlocal record
+                context = session.context
+                backend = AuthenticatedBackend(context)
+                page = await context.new_page()
+                durable_handoff = False
+                try:
+                    helper_target_id = await page_target_id(context, page)
                     current = self.store.load(record.request_id)
-                    request_identity = TurnIdentity(
-                        transport_request_id=acceptance.request_id,
-                        user_message_id=acceptance.user_message_id,
-                        frontend_parent_message_id=acceptance.frontend_parent_message_id,
+                    record = self.store.save(
+                        current.with_helper_page(
+                            helper_target_id, keep=self.config.keep_helper_tab
+                        ),
+                        expected_revision=current.revision,
+                    )
+                    target_url = (
+                        ORIGIN if conversation_id is None else conversation_url(conversation_id)
+                    )
+                    await page.goto(
+                        target_url, wait_until="domcontentloaded", timeout=60_000
+                    )
+                    await verify_authenticated(page)
+
+                    baseline_graph: dict[str, Any] = {}
+                    pre_send_current: str | None = None
+                    if conversation_id is not None:
+                        snapshot = await backend.snapshot(conversation_id)
+                        if snapshot.stream_status.upper() not in _TERMINAL_STREAM:
+                            raise OwnershipConflictError(
+                                "conversation backend is active during locked preflight"
+                            )
+                        baseline_graph = snapshot.graph or {}
+                        current_node = baseline_graph.get("current_node")
+                        pre_send_current = (
+                            str(current_node) if current_node is not None else None
+                        )
+
+                    partial = TurnIdentity(
+                        conversation_id=conversation_id,
+                        pre_send_current_node=pre_send_current,
                         sources={
-                            key: "frontend-request"
+                            key: "preflight"
                             for key, value in (
-                                ("transport_request_id", acceptance.request_id),
-                                ("user_message_id", acceptance.user_message_id),
-                                ("frontend_parent_message_id", acceptance.frontend_parent_message_id),
+                                ("conversation_id", conversation_id),
+                                ("pre_send_current_node", pre_send_current),
                             )
                             if value is not None
                         },
                     )
-                    merged = merge_identity(
-                        current.identity or TurnIdentity(),
-                        request_identity,
-                        source="frontend-request",
-                    )
+                    record = self.store.load(record.request_id)
                     record = self.store.save(
-                        current.with_identity(merged)
-                        .with_send_provenance(SendProvenance.FRONTEND_ACCEPTED)
-                        .transition(TurnState.SENT),
+                        record.transition(TurnState.PREPARING)
+                        .with_identity(partial)
+                        .with_baseline(graph_fingerprints(baseline_graph)),
+                        expected_revision=record.revision,
+                    )
+                    await fill_composer(page, prompt)
+                    record = self.store.save(
+                        record.with_send_provenance(
+                            SendProvenance.CLICK_BOUNDARY_ENTERED
+                        ),
+                        expected_revision=record.revision,
+                    )
+                    click_entered = True
+
+                    async def on_accepted(acceptance: FrontendAcceptance) -> None:
+                        nonlocal record
+                        current = self.store.load(record.request_id)
+                        request_identity = TurnIdentity(
+                            transport_request_id=acceptance.request_id,
+                            user_message_id=acceptance.user_message_id,
+                            frontend_parent_message_id=acceptance.frontend_parent_message_id,
+                            sources={
+                                key: "frontend-request"
+                                for key, value in (
+                                    ("transport_request_id", acceptance.request_id),
+                                    ("user_message_id", acceptance.user_message_id),
+                                    (
+                                        "frontend_parent_message_id",
+                                        acceptance.frontend_parent_message_id,
+                                    ),
+                                )
+                                if value is not None
+                            },
+                        )
+                        merged = merge_identity(
+                            current.identity or TurnIdentity(),
+                            request_identity,
+                            source="frontend-request",
+                        )
+                        record = self.store.save(
+                            current.with_identity(merged)
+                            .with_send_provenance(SendProvenance.FRONTEND_ACCEPTED)
+                            .transition(TurnState.SENT),
+                            expected_revision=current.revision,
+                        )
+
+                    handoff = await send_real(
+                        page,
+                        send_timeout=self.config.send_timeout,
+                        on_accepted=on_accepted,
+                    )
+                    current = self.store.load(record.request_id)
+                    identity = merge_identity(
+                        current.identity or TurnIdentity(),
+                        handoff.identity,
+                        source="frontend-response",
+                    )
+                    if (
+                        conversation_id is not None
+                        and identity.conversation_id != conversation_id
+                    ):
+                        raise AmbiguousOutcomeError(
+                            "frontend accepted Send under a different conversation"
+                        )
+                    if identity.conversation_id is None:
+                        raise AmbiguousOutcomeError(
+                            "accepted Send has no durable conversation identity"
+                        )
+                    if claimed_conversation is None:
+                        with ConversationLock(
+                            self.config.state_dir,
+                            identity.conversation_id,
+                            timeout=2.0,
+                        ):
+                            self.store.claim_conversation(
+                                identity.conversation_id, record.request_id
+                            )
+                        claimed_conversation = identity.conversation_id
+
+                    record = self.store.save(
+                        current.with_identity(identity).transition(TurnState.SENT),
                         expected_revision=current.revision,
                     )
+                    identity = await self._bind_user_identity(
+                        backend, record, identity, prompt
+                    )
+                    record = self.store.load(record.request_id)
+                    record = self.store.save(
+                        record.with_identity(identity)
+                        .with_send_provenance(SendProvenance.USER_IDENTITY_BOUND)
+                        .with_send_provenance(SendProvenance.DURABLE_HANDOFF)
+                        .transition(TurnState.RUNNING),
+                        expected_revision=record.revision,
+                    )
+                    durable_handoff = True
+                    if not record.helper_page_keep:
+                        await self._close_current_helper(page, record.request_id)
+                        page = None
 
-                handoff = await send_real(
-                    page,
-                    send_timeout=self.config.send_timeout,
-                    on_accepted=on_accepted,
-                )
-                current = self.store.load(record.request_id)
-                identity = merge_identity(
-                    current.identity or TurnIdentity(),
-                    handoff.identity,
-                    source="frontend-response",
-                )
-                if conversation_id is not None and identity.conversation_id != conversation_id:
-                    raise AmbiguousOutcomeError(
-                        "frontend accepted Send under a different conversation"
+                    candidate = await monitor_live(
+                        identity,
+                        backend,
+                        timeout=self.config.timeout,
+                        poll=self.config.poll,
+                        stable_samples=self.config.stable_samples,
+                        stable_seconds=self.config.stable_seconds,
                     )
-                if identity.conversation_id is None:
-                    raise AmbiguousOutcomeError(
-                        "accepted Send has no durable conversation identity"
+                    record = self.store.load(record.request_id)
+                    record = self.store.save(
+                        record.with_response(candidate.text).transition(
+                            TurnState.COMPLETE
+                        ),
+                        expected_revision=record.revision,
                     )
-                if claimed_conversation is None:
-                    with ConversationLock(
-                        self.config.state_dir, identity.conversation_id, timeout=2.0
+                    self._release_if_owned(
+                        identity.conversation_id, record.request_id, terminal=True
+                    )
+                    return self._result(record, response=candidate.text)
+                finally:
+                    if page is not None and (
+                        not click_entered
+                        or (durable_handoff and not self.config.keep_helper_tab)
                     ):
-                        self.store.claim_conversation(
-                            identity.conversation_id, record.request_id
-                        )
-                    claimed_conversation = identity.conversation_id
-
-                record = self.store.save(
-                    current.with_identity(identity).transition(TurnState.SENT),
-                    expected_revision=current.revision,
-                )
-                identity = await self._bind_user_identity(
-                    backend,
-                    record,
-                    identity,
-                    prompt,
-                )
-                record = self.store.load(record.request_id)
-                record = self.store.save(
-                    record.with_identity(identity)
-                    .with_send_provenance(SendProvenance.USER_IDENTITY_BOUND)
-                    .with_send_provenance(SendProvenance.DURABLE_HANDOFF)
-                    .transition(TurnState.RUNNING),
-                    expected_revision=record.revision,
-                )
-                durable_handoff = True
-                if not self.config.keep_helper_tab:
-                    await page.close()
-                    page = None
-
-                candidate = await monitor_live(
-                    identity,
-                    backend,
-                    timeout=self.config.timeout,
-                    poll=self.config.poll,
-                    stable_samples=self.config.stable_samples,
-                    stable_seconds=self.config.stable_seconds,
-                )
-                record = self.store.load(record.request_id)
-                record = self.store.save(
-                    record.with_response(candidate.text).transition(TurnState.COMPLETE),
-                    expected_revision=record.revision,
-                )
-                self._release_if_owned(
-                    identity.conversation_id, record.request_id, terminal=True
-                )
-                return self._result(record, response=candidate.text)
+                        await self._close_current_helper(page, record.request_id)
         except CoreError as exc:
             current = self.store.load(record.request_id)
-            failure = exc.as_failure()
             state = (
                 TurnState.UNKNOWN
                 if click_entered and not current.terminal
@@ -478,35 +546,121 @@ class ChatGPTCore:
             )
             if not current.terminal:
                 current = self.store.save(
-                    current.transition(state, failure=failure),
+                    current.transition(state, failure=exc.as_failure()),
                     expected_revision=current.revision,
                 )
-            if claimed_conversation and state == TurnState.FAILED:
+            if claimed_conversation and not click_entered:
                 self._release_if_owned(
                     claimed_conversation, current.request_id, terminal=True
                 )
             return self._result(current)
         except Exception as exc:
             current = self.store.load(record.request_id)
-            failure = Failure(
-                category=FailureCategory.INVARIANT,
-                message=f"local invariant failure: {type(exc).__name__}: {exc}",
-                retryable=False,
-                external=False,
-            )
+            failure = self._unexpected_send_failure(exc, click_entered=click_entered)
             state = TurnState.UNKNOWN if click_entered else TurnState.FAILED
             if not current.terminal:
                 current = self.store.save(
                     current.transition(state, failure=failure),
                     expected_revision=current.revision,
                 )
+            if claimed_conversation and not click_entered:
+                self._release_if_owned(
+                    claimed_conversation, current.request_id, terminal=True
+                )
             return self._result(current)
+
+    async def _cleanup_terminal_helper(self, request_id: str) -> None:
+        record = self.store.load(request_id)
+        if (
+            record.helper_page_keep
+            or record.helper_page_target_id is None
+            or record.helper_page_closed_at is not None
+        ):
+            return
+        async with BrowserSession(self.config) as session:
+            assert session.context is not None
+            await self._close_owned_helper(session.context, request_id)
+
+    async def _close_current_helper(self, page: Page, request_id: str) -> None:
+        try:
+            await page.close()
         finally:
-            if page is not None and (not click_entered or durable_handoff):
-                try:
-                    await page.close()
-                except Exception:
-                    pass
+            if page.is_closed():
+                self._mark_helper_closed(request_id)
+
+    async def _close_owned_helper(self, context: Any, request_id: str) -> None:
+        for _attempt in range(4):
+            record = self.store.load(request_id)
+            if (
+                record.helper_page_keep
+                or record.helper_page_target_id is None
+                or record.helper_page_closed_at is not None
+            ):
+                return
+            target_id = record.helper_page_target_id
+            await close_page_by_target_id(context, target_id)
+            current = self.store.load(request_id)
+            if current.helper_page_closed_at is not None:
+                return
+            if current.helper_page_target_id != target_id:
+                raise AmbiguousOutcomeError(
+                    "durable helper target identity changed during cleanup"
+                )
+            try:
+                self.store.save(
+                    current.with_helper_page_closed(),
+                    expected_revision=current.revision,
+                )
+                return
+            except ConcurrentStateError:
+                continue
+        raise AmbiguousOutcomeError(
+            "helper cleanup state changed repeatedly during exact recovery"
+        )
+
+    def _mark_helper_closed(self, request_id: str) -> None:
+        for _attempt in range(4):
+            current = self.store.load(request_id)
+            if (
+                current.helper_page_target_id is None
+                or current.helper_page_closed_at is not None
+            ):
+                return
+            try:
+                self.store.save(
+                    current.with_helper_page_closed(),
+                    expected_revision=current.revision,
+                )
+                return
+            except ConcurrentStateError:
+                continue
+        raise AmbiguousOutcomeError(
+            "helper closure state changed repeatedly"
+        )
+
+    @staticmethod
+    def _unexpected_send_failure(
+        exc: Exception, *, click_entered: bool
+    ) -> Failure:
+        if click_entered:
+            return AmbiguousOutcomeError(
+                "browser operation failed after the irreversible Send boundary: "
+                f"{type(exc).__name__}"
+            ).as_failure()
+        if isinstance(exc, PlaywrightTimeoutError):
+            return OperationTimeoutError(
+                "browser operation timed out before the Send boundary"
+            ).as_failure()
+        if isinstance(exc, PlaywrightError):
+            return NetworkError(
+                "browser operation failed before the Send boundary"
+            ).as_failure()
+        return Failure(
+            category=FailureCategory.INVARIANT,
+            message=f"local invariant failure: {type(exc).__name__}: {exc}",
+            retryable=False,
+            external=False,
+        )
 
     async def _ensure_monitorable_identity(
         self,
@@ -531,7 +685,8 @@ class ChatGPTCore:
             )
             if not identity.has_transport_correlation and not structural_reconcile:
                 raise IdentityMissingError(
-                    "persisted request lacks safe transport or graph-delta reconciliation evidence"
+                    "persisted request lacks safe transport or graph-delta "
+                    "reconciliation evidence"
                 )
             snapshot = await backend.snapshot(identity.conversation_id)
             if snapshot.graph is None:

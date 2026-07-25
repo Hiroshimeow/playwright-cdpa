@@ -37,10 +37,22 @@ class SendProvenance(str, Enum):
 _ALLOWED_TRANSITIONS: dict[TurnState, frozenset[TurnState]] = {
     TurnState.NEW: frozenset({TurnState.PREPARING, TurnState.CANCELLED, TurnState.FAILED}),
     TurnState.PREPARING: frozenset(
-        {TurnState.SENT, TurnState.RUNNING, TurnState.UNKNOWN, TurnState.CANCELLED, TurnState.FAILED}
+        {
+            TurnState.SENT,
+            TurnState.RUNNING,
+            TurnState.UNKNOWN,
+            TurnState.CANCELLED,
+            TurnState.FAILED,
+        }
     ),
     TurnState.SENT: frozenset(
-        {TurnState.RUNNING, TurnState.COMPLETE, TurnState.UNKNOWN, TurnState.CANCELLED, TurnState.FAILED}
+        {
+            TurnState.RUNNING,
+            TurnState.COMPLETE,
+            TurnState.UNKNOWN,
+            TurnState.CANCELLED,
+            TurnState.FAILED,
+        }
     ),
     TurnState.RUNNING: frozenset(
         {TurnState.COMPLETE, TurnState.UNKNOWN, TurnState.CANCELLED, TurnState.FAILED}
@@ -71,7 +83,11 @@ class TurnIdentity:
 
     @property
     def has_transport_correlation(self) -> bool:
-        return bool(self.transport_turn_exchange_id or self.transport_request_id or self.stream_topic_id)
+        return bool(
+            self.transport_turn_exchange_id
+            or self.transport_request_id
+            or self.stream_topic_id
+        )
 
     @property
     def has_graph_correlation(self) -> bool:
@@ -164,6 +180,9 @@ class TurnRecord:
     response_sha256: str | None = None
     response_length: int | None = None
     cancellation_requested_at: str | None = None
+    helper_page_target_id: str | None = None
+    helper_page_keep: bool = False
+    helper_page_closed_at: str | None = None
 
     @classmethod
     def new(
@@ -180,7 +199,7 @@ class TurnRecord:
             raise ValueError("conversation target requires target_conversation_id")
         now = utc_now()
         return cls(
-            schema_version=3,
+            schema_version=4,
             request_id=request_id,
             state=TurnState.NEW,
             send_provenance=SendProvenance.NOT_ATTEMPTED,
@@ -243,7 +262,11 @@ class TurnRecord:
         return replace(self, identity=identity, updated_at=utc_now())
 
     def with_baseline(self, fingerprints: dict[str, str]) -> TurnRecord:
-        return replace(self, baseline_node_fingerprints=dict(fingerprints), updated_at=utc_now())
+        return replace(
+            self,
+            baseline_node_fingerprints=dict(fingerprints),
+            updated_at=utc_now(),
+        )
 
     def with_response(self, response: str) -> TurnRecord:
         return replace(
@@ -256,9 +279,27 @@ class TurnRecord:
     def request_cancellation(self) -> TurnRecord:
         return replace(self, cancellation_requested_at=utc_now(), updated_at=utc_now())
 
+    def with_helper_page(self, target_id: str, *, keep: bool) -> TurnRecord:
+        if not target_id or len(target_id) > 256:
+            raise ValueError("helper target ID is invalid")
+        if self.helper_page_target_id not in {None, target_id}:
+            raise ValueError("helper target identity cannot change")
+        return replace(
+            self,
+            helper_page_target_id=target_id,
+            helper_page_keep=keep,
+            helper_page_closed_at=None,
+            updated_at=utc_now(),
+        )
+
+    def with_helper_page_closed(self) -> TurnRecord:
+        if self.helper_page_target_id is None:
+            return self
+        return replace(self, helper_page_closed_at=utc_now(), updated_at=utc_now())
+
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "request_id": self.request_id,
             "state": self.state.value,
             "send_provenance": self.send_provenance.value,
@@ -275,6 +316,9 @@ class TurnRecord:
             "response_sha256": self.response_sha256,
             "response_length": self.response_length,
             "cancellation_requested_at": self.cancellation_requested_at,
+            "helper_page_target_id": self.helper_page_target_id,
+            "helper_page_keep": self.helper_page_keep,
+            "helper_page_closed_at": self.helper_page_closed_at,
         }
 
     @classmethod
@@ -282,7 +326,7 @@ class TurnRecord:
         from .errors import FailureCategory
 
         raw_schema = value.get("schema_version")
-        if raw_schema not in {2, 3}:
+        if raw_schema not in {2, 3, 4}:
             raise ValueError("unsupported turn record schema")
         raw_failure = value.get("failure")
         failure = None
@@ -328,7 +372,7 @@ class TurnRecord:
             migrated["sources"] = sources
             raw_identity = migrated
         return cls(
-            schema_version=3,
+            schema_version=4,
             request_id=str(value["request_id"]),
             state=TurnState(str(value["state"])),
             send_provenance=SendProvenance(str(value["send_provenance"])),
@@ -346,7 +390,11 @@ class TurnRecord:
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
             failure=failure,
-            response_sha256=(str(value["response_sha256"]) if value.get("response_sha256") else None),
+            response_sha256=(
+                str(value["response_sha256"])
+                if value.get("response_sha256")
+                else None
+            ),
             response_length=(
                 int(value["response_length"])
                 if value.get("response_length") is not None
@@ -355,6 +403,17 @@ class TurnRecord:
             cancellation_requested_at=(
                 str(value["cancellation_requested_at"])
                 if value.get("cancellation_requested_at")
+                else None
+            ),
+            helper_page_target_id=(
+                str(value["helper_page_target_id"])
+                if value.get("helper_page_target_id")
+                else None
+            ),
+            helper_page_keep=bool(value.get("helper_page_keep", False)),
+            helper_page_closed_at=(
+                str(value["helper_page_closed_at"])
+                if value.get("helper_page_closed_at")
                 else None
             ),
         )
@@ -429,7 +488,11 @@ class Result:
 
     @property
     def success(self) -> bool:
-        return self.state == TurnState.COMPLETE and self.response is not None and self.failure is None
+        return (
+            self.state == TurnState.COMPLETE
+            and self.response is not None
+            and self.failure is None
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

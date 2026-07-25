@@ -37,3 +37,34 @@ def test_prompt_body_is_not_serialized() -> None:
     payload = record.to_dict()
     assert "secret prompt body" not in str(payload)
     assert payload["prompt_length"] == len("secret prompt body")
+
+
+def test_helper_target_ownership_round_trips_in_schema_four(tmp_path) -> None:
+    from playwright_gpt_core.storage import StateStore
+
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id="helper", prompt="hello").with_helper_page(
+        "target-123", keep=False
+    )
+    saved = store.save(record)
+    loaded = store.load("helper")
+    assert saved.schema_version == 4
+    assert loaded.helper_page_target_id == "target-123"
+    assert loaded.helper_page_closed_at is None
+    closed = store.save(
+        loaded.with_helper_page_closed(), expected_revision=loaded.revision
+    )
+    assert closed.helper_page_closed_at is not None
+
+
+def test_schema_three_record_migrates_without_helper_ownership() -> None:
+    payload = TurnRecord.new(request_id="legacy", prompt="hello").to_dict()
+    payload["schema_version"] = 3
+    payload.pop("helper_page_target_id")
+    payload.pop("helper_page_keep")
+    payload.pop("helper_page_closed_at")
+    migrated = TurnRecord.from_dict(payload)
+    assert migrated.schema_version == 4
+    assert migrated.helper_page_target_id is None
+    assert migrated.helper_page_keep is False
+    assert migrated.helper_page_closed_at is None
