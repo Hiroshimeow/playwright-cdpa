@@ -83,6 +83,10 @@ class BackendError(CoreError):
     external = True
 
 
+class BackendUnavailableError(BackendError):
+    retryable = True
+
+
 class SchemaDriftError(CoreError):
     category = FailureCategory.SCHEMA_DRIFT
     external = True

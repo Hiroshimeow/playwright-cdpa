@@ -304,3 +304,49 @@ def test_conflicting_identity_inside_one_graph_segment_is_rejected() -> None:
     )
     with pytest.raises(ConflictingIdentityError):
         GraphResolver(identity()).resolve(snapshot)
+
+
+def test_internal_subturn_cannot_replace_missing_original_user_correlation() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root", turn=None, request=None),
+        message(
+            "tool-call",
+            "assistant",
+            "user-1",
+            text="{}",
+            turn=None,
+            request=None,
+            recipient="tool.backend",
+            status="finished_successfully",
+            content_type="code",
+        ),
+        message(
+            "tool-result",
+            "tool",
+            "tool-call",
+            text="result",
+            turn=None,
+            request=None,
+            status="finished_successfully",
+        ),
+        message(
+            "internal-user",
+            "user",
+            "tool-result",
+            text="internal",
+            turn="turn-2",
+            request="req-2",
+        ),
+        message(
+            "assistant-final",
+            "assistant",
+            "internal-user",
+            text="UNPROVEN",
+            turn="turn-2",
+            request="req-2",
+        ),
+        current="assistant-final",
+    )
+    with pytest.raises(IdentityMissingError):
+        GraphResolver(identity()).resolve(snapshot)

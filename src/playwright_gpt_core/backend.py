@@ -7,6 +7,7 @@ from playwright.async_api import APIRequestContext, BrowserContext
 from .errors import (
     AuthenticationRequiredError,
     BackendError,
+    BackendUnavailableError,
     NetworkError,
     SchemaDriftError,
 )
@@ -45,7 +46,9 @@ class AuthenticatedBackend(SnapshotSource):
         if response.status == 401:
             raise AuthenticationRequiredError("backend rejected authenticated browser session")
         if response.status >= 500 or response.status == 429:
-            raise BackendError(f"backend GET failed with HTTP {response.status}")
+            raise BackendUnavailableError(
+                f"backend GET failed with HTTP {response.status}"
+            )
         if response.status != 200:
             raise BackendError(f"backend GET returned HTTP {response.status}")
         try:

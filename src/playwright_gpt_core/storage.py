@@ -37,6 +37,17 @@ class StateStore:
     def load(self, request_id: str) -> TurnRecord:
         return self._load(self.turn_path(request_id), TurnRecord.from_dict)
 
+    def create(self, record: TurnRecord) -> TurnRecord:
+        with self.record_lock("turn", record.request_id):
+            path = self.turn_path(record.request_id)
+            if path.exists():
+                raise OwnershipConflictError(
+                    f"request_id {record.request_id!r} already exists"
+                )
+            saved = replace(record, revision=1)
+            self._atomic_json(path, saved.to_dict())
+            return saved
+
     def save(self, record: TurnRecord, *, expected_revision: int | None = None) -> TurnRecord:
         with self.record_lock("turn", record.request_id):
             path = self.turn_path(record.request_id)

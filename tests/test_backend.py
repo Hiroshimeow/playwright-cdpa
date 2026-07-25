@@ -41,3 +41,25 @@ async def test_backend_uses_token_in_memory_and_never_exposes_it() -> None:
     assert "token-secret" not in repr(snapshot)
     assert backend.__dict__["_token"] == "token-secret"
     assert all("Cookie" not in headers for _url, headers in context.request.calls)
+
+
+class UnavailableRequest(Request):
+    async def get(self, url: str, headers: dict[str, str]):
+        self.calls.append((url, headers))
+        if url.endswith("/api/auth/session"):
+            return Response(200, {"accessToken": "token-secret"})
+        return Response(503, {"error": "temporary"})
+
+
+@pytest.mark.asyncio
+async def test_backend_5xx_is_external_and_retryable() -> None:
+    from playwright_gpt_core.errors import BackendUnavailableError
+
+    context = Context()
+    context.request = UnavailableRequest()
+    backend = AuthenticatedBackend(context)  # type: ignore[arg-type]
+    with pytest.raises(BackendUnavailableError) as caught:
+        await backend.get_json("/backend-api/conversation/test")
+    failure = caught.value.as_failure()
+    assert failure.external is True
+    assert failure.retryable is True

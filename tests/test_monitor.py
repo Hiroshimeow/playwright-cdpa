@@ -65,3 +65,23 @@ async def test_terminal_backend_failure_is_distinct_from_convergence() -> None:
             [("FAILED", snapshot("not-a-success"))],
             stable_samples=2,
         )
+
+
+@pytest.mark.asyncio
+async def test_idle_status_can_converge_an_exact_final_graph() -> None:
+    result = await monitor_snapshots(
+        IDENTITY,
+        [("IDLE", snapshot("idle-final")), ("IDLE", snapshot("idle-final"))],
+        stable_samples=2,
+    )
+    assert result.text == "idle-final"
+
+
+@pytest.mark.asyncio
+async def test_not_found_without_exact_graph_is_convergence_failure() -> None:
+    with pytest.raises(GraphConvergenceTimeout):
+        await monitor_snapshots(
+            IDENTITY,
+            [("NOT_FOUND", graph(message("root", "system", None, turn=None, request=None), current="root"))],
+            stable_samples=2,
+        )

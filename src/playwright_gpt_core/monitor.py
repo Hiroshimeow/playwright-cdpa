@@ -15,6 +15,8 @@ from .errors import (
 from .graph import GraphCandidate, GraphResolver
 from .models import TurnIdentity
 
+_GRAPH_TERMINAL_STATUSES = {"COMPLETE", "COMPLETED", "IDLE", "NOT_FOUND"}
+
 
 @dataclass(frozen=True, slots=True)
 class MonitorSnapshot:
@@ -41,7 +43,7 @@ async def monitor_snapshots(
         status = raw_status.upper()
         if status in {"FAILED", "ERROR", "CANCELLED", "CANCELED"}:
             raise BackendError(f"turn ended with backend status {status}")
-        if status not in {"COMPLETE", "COMPLETED"}:
+        if status not in _GRAPH_TERMINAL_STATUSES:
             continue
         complete_seen = True
         try:
@@ -59,7 +61,7 @@ async def monitor_snapshots(
     if complete_seen:
         suffix = f": {last_error}" if last_error else ""
         raise GraphConvergenceTimeout(f"exact final graph did not converge{suffix}")
-    raise OperationTimeoutError("no COMPLETE stream status observed")
+    raise OperationTimeoutError("no terminal stream status observed")
 
 
 async def monitor_live(
@@ -87,7 +89,7 @@ async def monitor_live(
             raise BackendError(f"turn ended with backend status {status}")
         if status in {"CANCELLED", "CANCELED"}:
             raise BackendError("turn was cancelled")
-        if status in {"COMPLETE", "COMPLETED"}:
+        if status in _GRAPH_TERMINAL_STATUSES:
             complete_seen = True
             if snapshot.graph is not None:
                 try:
@@ -107,5 +109,5 @@ async def monitor_live(
         await asyncio.sleep(poll)
     if complete_seen:
         suffix = f": {last_identity_error}" if last_identity_error else ""
-        raise GraphConvergenceTimeout(f"stream completed but exact graph did not converge{suffix}")
+        raise GraphConvergenceTimeout(f"terminal stream did not yield a converged exact graph{suffix}")
     raise OperationTimeoutError(f"timed out after {timeout:g}s waiting for exact turn")

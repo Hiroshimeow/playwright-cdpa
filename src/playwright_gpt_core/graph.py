@@ -238,6 +238,7 @@ class GraphResolver:
                 positive = True
                 continue
 
+            node_positive = False
             for field in fields:
                 expected = segment.get(field)
                 present = metadata.get(field)
@@ -247,7 +248,12 @@ class GraphResolver:
                     raise ConflictingIdentityError(
                         f"exact graph segment {field} conflicts with its segment identity"
                     )
+                node_positive = True
                 positive = True
+            if index == 0 and not node_positive:
+                raise IdentityMissingError(
+                    "submitted user node has no positive canonical graph correlation"
+                )
 
         if not positive:
             raise IdentityMissingError("exact branch has no positive graph correlation")

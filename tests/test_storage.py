@@ -38,3 +38,16 @@ def test_state_file_contains_no_prompt_or_secret(tmp_path) -> None:
     assert "Bearer" not in raw
     assert "top.secret.value" not in raw
     json.loads(raw)
+
+
+def test_create_rejects_duplicate_request_identity(tmp_path) -> None:
+    from playwright_gpt_core.errors import OwnershipConflictError
+
+    store = StateStore(tmp_path)
+    store.create(TurnRecord.new(request_id="same-request", prompt="first"))
+    with pytest.raises(OwnershipConflictError):
+        store.create(TurnRecord.new(request_id="same-request", prompt="second"))
+    persisted = store.load("same-request")
+    assert persisted.prompt_sha256 == TurnRecord.new(
+        request_id="same-request", prompt="first"
+    ).prompt_sha256

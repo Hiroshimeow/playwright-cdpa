@@ -94,7 +94,7 @@ class ChatGPTCore:
             target_kind="fresh" if fresh else "conversation",
             target_conversation_id=conversation_id,
         )
-        record = self.store.save(record)
+        record = self.store.create(record)
         return await self._send_record(record, prompt, conversation_id)
 
     async def wait_idle_and_send(
