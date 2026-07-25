@@ -590,16 +590,23 @@ class ChatGPTCore:
         self, record: TurnRecord, exc: CoreError
     ) -> Result:
         current = self.store.load(record.request_id)
-        if not current.terminal:
-            target_state = (
-                TurnState.FAILED
-                if current.send_provenance == SendProvenance.NOT_ATTEMPTED
-                else TurnState.UNKNOWN
+        if current.terminal:
+            return Result(
+                schema_version=1,
+                request_id=current.request_id,
+                state=current.state,
+                identity=current.identity,
+                failure=exc.as_failure(),
             )
-            current = self.store.save(
-                current.transition(target_state, failure=exc.as_failure()),
-                expected_revision=current.revision,
-            )
+        target_state = (
+            TurnState.FAILED
+            if current.send_provenance == SendProvenance.NOT_ATTEMPTED
+            else TurnState.UNKNOWN
+        )
+        current = self.store.save(
+            current.transition(target_state, failure=exc.as_failure()),
+            expected_revision=current.revision,
+        )
         return self._result(current)
 
     def _release_if_owned(

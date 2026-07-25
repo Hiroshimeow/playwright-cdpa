@@ -181,28 +181,76 @@ class GraphResolver:
     def _validate_chain_correlation(
         self, mapping: dict[str, Any], exact_nodes: list[str]
     ) -> None:
+        fields = ("turn_exchange_id", "request_id", "working_turn_id")
+        segment: dict[str, str | None] = {
+            field: getattr(self.identity, field) for field in fields
+        }
         positive = False
-        for node_id in exact_nodes:
+
+        for index, node_id in enumerate(exact_nodes):
             node = mapping.get(node_id)
             if not isinstance(node, dict):
-                continue
+                raise IdentityMissingError("exact branch contains a malformed node")
             message = node.get("message")
             if not isinstance(message, dict):
                 continue
+            author = message.get("author")
+            role = str(author.get("role") or "") if isinstance(author, dict) else ""
             metadata = (
-                message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+                message.get("metadata")
+                if isinstance(message.get("metadata"), dict)
+                else {}
             )
-            for field in ("turn_exchange_id", "request_id", "working_turn_id"):
-                expected = getattr(self.identity, field)
+
+            if index > 0 and role == "user":
+                parent_id = node.get("parent")
+                parent = mapping.get(parent_id) if isinstance(parent_id, str) else None
+                parent_message = (
+                    parent.get("message") if isinstance(parent, dict) else None
+                )
+                parent_author = (
+                    parent_message.get("author")
+                    if isinstance(parent_message, dict)
+                    else None
+                )
+                parent_role = (
+                    str(parent_author.get("role") or "")
+                    if isinstance(parent_author, dict)
+                    else ""
+                )
+                if parent_role != "tool":
+                    raise ConflictingIdentityError(
+                        "a later user node is not a tool-parented internal continuation"
+                    )
+                next_segment = {
+                    field: (
+                        str(metadata[field])
+                        if metadata.get(field) is not None
+                        else None
+                    )
+                    for field in fields
+                }
+                if not any(next_segment.values()):
+                    raise IdentityMissingError(
+                        "tool-parented internal continuation has no graph correlation"
+                    )
+                segment = next_segment
+                positive = True
+                continue
+
+            for field in fields:
+                expected = segment.get(field)
                 present = metadata.get(field)
-                if expected is not None and present is not None:
-                    if str(present) != expected:
-                        raise ConflictingIdentityError(
-                            f"exact chain {field} conflicts with canonical graph identity"
-                        )
-                    positive = True
+                if expected is None or present is None:
+                    continue
+                if str(present) != expected:
+                    raise ConflictingIdentityError(
+                        f"exact graph segment {field} conflicts with its segment identity"
+                    )
+                positive = True
+
         if not positive:
-            raise IdentityMissingError("exact chain has no positive turn correlation")
+            raise IdentityMissingError("exact branch has no positive graph correlation")
 
     def _validate_tool_state(self, mapping: dict[str, Any], exact_nodes: list[str]) -> None:
         pending_tool_calls = 0

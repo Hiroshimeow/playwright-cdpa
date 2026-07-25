@@ -194,3 +194,113 @@ def test_tool_call_without_result_blocks_final_candidate() -> None:
     )
     with pytest.raises(IdentityMissingError):
         GraphResolver(identity()).resolve(snapshot)
+
+
+def test_tool_parented_internal_user_subturn_may_change_graph_ids() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root", turn="turn-1", request="req-1"),
+        message(
+            "tool-call-1",
+            "assistant",
+            "user-1",
+            text="{}",
+            turn="turn-1",
+            request="req-1",
+            recipient="tool.backend",
+            status="finished_successfully",
+            content_type="code",
+        ),
+        message(
+            "tool-result-1",
+            "tool",
+            "tool-call-1",
+            text="first result",
+            turn="turn-1",
+            request="req-1",
+            status="finished_successfully",
+        ),
+        message(
+            "internal-user",
+            "user",
+            "tool-result-1",
+            text="internal continuation",
+            turn="turn-2",
+            request="req-2",
+        ),
+        message(
+            "tool-call-2",
+            "assistant",
+            "internal-user",
+            text="{}",
+            turn="turn-2",
+            request="req-2",
+            recipient="tool.backend",
+            status="finished_successfully",
+            content_type="code",
+        ),
+        message(
+            "tool-result-2",
+            "tool",
+            "tool-call-2",
+            text="second result",
+            turn="turn-2",
+            request="req-2",
+            status="finished_successfully",
+        ),
+        message(
+            "assistant-final",
+            "assistant",
+            "tool-result-2",
+            text="TOOL_SUBTURN_OK",
+            turn="turn-2",
+            request="req-2",
+        ),
+        current="assistant-final",
+    )
+    assert GraphResolver(identity()).resolve(snapshot).text == "TOOL_SUBTURN_OK"
+
+
+def test_later_human_user_turn_below_assistant_is_rejected() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root", turn="turn-1", request="req-1"),
+        message("assistant-1", "assistant", "user-1", text="FIRST"),
+        message(
+            "later-user",
+            "user",
+            "assistant-1",
+            text="new human turn",
+            turn="turn-2",
+            request="req-2",
+        ),
+        message(
+            "later-final",
+            "assistant",
+            "later-user",
+            text="WRONG TURN",
+            turn="turn-2",
+            request="req-2",
+        ),
+        current="later-final",
+    )
+    with pytest.raises(ConflictingIdentityError):
+        GraphResolver(identity()).resolve(snapshot)
+
+
+def test_conflicting_identity_inside_one_graph_segment_is_rejected() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root", turn="turn-1", request="req-1"),
+        message(
+            "assistant-1",
+            "assistant",
+            "user-1",
+            text="WRONG",
+            turn="turn-other",
+            request="req-1",
+        ),
+        current="assistant-1",
+    )
+    with pytest.raises(ConflictingIdentityError):
+        GraphResolver(identity()).resolve(snapshot)
