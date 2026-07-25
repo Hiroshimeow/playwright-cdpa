@@ -23,7 +23,6 @@ from .errors import (
 )
 from .frontend import (
     ORIGIN,
-    clear_composer,
     fill_composer,
     find_stop_button,
     verify_authenticated,

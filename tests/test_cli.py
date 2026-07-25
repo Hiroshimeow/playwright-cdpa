@@ -66,3 +66,25 @@ def test_get_json_outputs_one_machine_readable_object(tmp_path, capsys) -> None:
     value = json.loads(output)
     assert value["request_id"] == "req-1"
     assert "secret prompt" not in output
+
+
+def test_missing_get_returns_invalid_exit_and_json_failure(tmp_path, capsys) -> None:
+    code = main(["get", "missing", "--state-dir", str(tmp_path), "--json"])
+    value = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert value["failure"]["category"] == "invalid_input"
+
+
+def test_recoverable_backend_failure_maps_to_exit_ten() -> None:
+    result = Result(
+        1,
+        "r",
+        TurnState.UNKNOWN,
+        failure=Failure(
+            FailureCategory.BACKEND,
+            "temporary backend outage",
+            retryable=True,
+            external=True,
+        ),
+    )
+    assert exit_code(result, command="watch") == 10

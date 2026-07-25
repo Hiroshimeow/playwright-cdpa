@@ -90,7 +90,7 @@ async def _run(args: argparse.Namespace) -> Result:
 
 
 def exit_code(result: Result, *, command: str) -> int:
-    if command == "get":
+    if command == "get" and result.failure is None:
         return EXIT_SUCCESS
     if result.state == TurnState.CANCELLED:
         return EXIT_CANCELLED
