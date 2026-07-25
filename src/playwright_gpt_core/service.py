@@ -112,9 +112,9 @@ class ChatGPTCore:
         if record.state == TurnState.CANCELLED:
             return self._result(record)
         identity = record.identity
-        if identity is None or not identity.conversation_id or not identity.user_message_id:
+        if identity is None or not identity.conversation_id:
             failure = IdentityMissingError(
-                "persisted request lacks exact conversation or user-message identity"
+                "persisted request lacks exact conversation identity"
             ).as_failure()
             return Result(
                 1,
@@ -172,68 +172,135 @@ class ChatGPTCore:
             return self._result(record)
         identity = record.identity
         if identity is None or not identity.conversation_id:
-            failure = CancellationUnprovenError(
-                "cannot prove cancellation without durable conversation identity"
-            ).as_failure()
+            return self._persist_cancellation_unproven(
+                record,
+                "cannot prove cancellation without durable conversation identity",
+            )
+        conversation_id = identity.conversation_id
+        page: Page | None = None
+        try:
+            with ConversationLock(self.config.state_dir, conversation_id, timeout=2.0):
+                async with BrowserSession(self.config) as session:
+                    assert session.context is not None
+                    backend = AuthenticatedBackend(session.context)
+                    identity = await self._ensure_monitorable_identity(record, backend)
+                    preflight = await backend.snapshot(conversation_id)
+                    resolver = GraphResolver(identity)
+                    resolver.validate_exact_branch(preflight.graph or {})
+                    terminal = await self._terminal_after_cancel_observation(
+                        request_id,
+                        identity,
+                        preflight.stream_status,
+                        preflight.graph or {},
+                    )
+                    if terminal is not None:
+                        return terminal
+                    page = await session.context.new_page()
+                    try:
+                        await page.goto(
+                            conversation_url(conversation_id),
+                            wait_until="domcontentloaded",
+                            timeout=60_000,
+                        )
+                        await verify_authenticated(page)
+                        stop = await find_stop_button(page)
+                        if stop is None:
+                            raise CancellationUnprovenError(
+                                "the exact active conversation has no visible Stop control"
+                            )
+                        await stop.click()
+                        deadline = time.monotonic() + min(20.0, self.config.timeout)
+                        observed = ""
+                        while time.monotonic() < deadline:
+                            snapshot = await backend.snapshot(conversation_id)
+                            observed = snapshot.stream_status.upper()
+                            terminal = await self._terminal_after_cancel_observation(
+                                request_id,
+                                identity,
+                                observed,
+                                snapshot.graph or {},
+                            )
+                            if terminal is not None:
+                                return terminal
+                            await asyncio.sleep(self.config.poll)
+                        raise CancellationUnprovenError(
+                            "Stop was clicked but cancellation was not proven; "
+                            f"last status {observed or 'unknown'}"
+                        )
+                    finally:
+                        await page.close()
+                        page = None
+        except CancellationUnprovenError as exc:
+            return self._persist_cancellation_unproven(
+                self.store.load(request_id), str(exc)
+            )
+        except CoreError as exc:
+            current = self.store.load(request_id)
+            if not current.terminal:
+                current = self.store.save(
+                    current.transition(TurnState.UNKNOWN, failure=exc.as_failure()),
+                    expected_revision=current.revision,
+                )
+            return self._result(current)
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+
+    async def _terminal_after_cancel_observation(
+        self,
+        request_id: str,
+        identity: TurnIdentity,
+        status: str,
+        graph: dict[str, Any],
+    ) -> Result | None:
+        normalized = status.upper()
+        if normalized in {"CANCELLED", "CANCELED"}:
+            current = self.store.load(request_id)
+            if not current.terminal:
+                current = self.store.save(
+                    current.transition(TurnState.CANCELLED),
+                    expected_revision=current.revision,
+                )
+            if identity.conversation_id:
+                self._release_if_owned(
+                    identity.conversation_id, request_id, terminal=True
+                )
+            return self._result(current)
+        if normalized in {"COMPLETE", "COMPLETED", "IDLE", "NOT_FOUND"}:
+            try:
+                candidate = GraphResolver(identity).resolve(graph)
+            except CoreError:
+                if normalized in {"COMPLETE", "COMPLETED"}:
+                    raise CancellationUnprovenError(
+                        "backend is terminal but no exact final or cancellation proof exists"
+                    )
+                return None
+            current = self.store.load(request_id)
+            if not current.terminal:
+                current = self.store.save(
+                    current.with_response(candidate.text).transition(TurnState.COMPLETE),
+                    expected_revision=current.revision,
+                )
+            if identity.conversation_id:
+                self._release_if_owned(
+                    identity.conversation_id, request_id, terminal=True
+                )
+            return self._result(current, response=candidate.text)
+        return None
+
+    def _persist_cancellation_unproven(
+        self, record: TurnRecord, message: str
+    ) -> Result:
+        failure = CancellationUnprovenError(message).as_failure()
+        if not record.terminal:
             record = self.store.save(
                 record.transition(TurnState.UNKNOWN, failure=failure),
                 expected_revision=record.revision,
             )
-            return self._result(record)
-
-        conversation_id = identity.conversation_id
-        with ConversationLock(self.config.state_dir, conversation_id, timeout=2.0):
-            async with BrowserSession(self.config) as session:
-                assert session.context is not None
-                page = await session.context.new_page()
-                try:
-                    await page.goto(
-                        conversation_url(conversation_id),
-                        wait_until="domcontentloaded",
-                        timeout=60_000,
-                    )
-                    await verify_authenticated(page)
-                    stop = await find_stop_button(page)
-                    if stop is None:
-                        raise CancellationUnprovenError(
-                            "the exact conversation has no visible Stop control"
-                        )
-                    await stop.click()
-                    backend = AuthenticatedBackend(session.context)
-                    deadline = time.monotonic() + min(15.0, self.config.timeout)
-                    observed = ""
-                    while time.monotonic() < deadline:
-                        snapshot = await backend.snapshot(conversation_id)
-                        observed = snapshot.stream_status.upper()
-                        if observed in {"CANCELLED", "CANCELED"}:
-                            record = self.store.load(request_id)
-                            record = self.store.save(
-                                record.transition(TurnState.CANCELLED),
-                                expected_revision=record.revision,
-                            )
-                            self._release_if_owned(
-                                conversation_id, request_id, terminal=True
-                            )
-                            return self._result(record)
-                        if observed in {"COMPLETE", "COMPLETED"}:
-                            candidate = GraphResolver(identity).resolve(snapshot.graph or {})
-                            record = self.store.load(request_id)
-                            record = self.store.save(
-                                record.with_response(candidate.text).transition(
-                                    TurnState.COMPLETE
-                                ),
-                                expected_revision=record.revision,
-                            )
-                            self._release_if_owned(
-                                conversation_id, request_id, terminal=True
-                            )
-                            return self._result(record, response=candidate.text)
-                        await asyncio.sleep(self.config.poll)
-                    raise CancellationUnprovenError(
-                        f"Stop was clicked but cancellation was not proven; last status {observed or 'unknown'}"
-                    )
-                finally:
-                    await page.close()
+        return self._result(record)
 
     async def _send_record(
         self,
@@ -448,15 +515,24 @@ class ChatGPTCore:
         backend: AuthenticatedBackend,
     ) -> TurnIdentity:
         identity = record.identity
-        if identity is None or not identity.conversation_id or not identity.user_message_id:
+        if identity is None or not identity.conversation_id:
             raise IdentityMissingError(
-                "persisted request lacks exact conversation or user-message identity"
+                "persisted request lacks exact conversation identity"
             )
         current = self.store.load(record.request_id)
         if not identity.monitorable:
-            if not identity.has_transport_correlation:
+            structural_reconcile = bool(
+                current.send_provenance == SendProvenance.RETRY_PROHIBITED
+                and identity.pre_send_current_node
+                and current.baseline_node_fingerprints
+                and current.target_kind == "conversation"
+                and current.target_conversation_id == identity.conversation_id
+                and self.store.load_conversation(identity.conversation_id).active_request_id
+                == current.request_id
+            )
+            if not identity.has_transport_correlation and not structural_reconcile:
                 raise IdentityMissingError(
-                    "persisted request has neither graph nor transport turn correlation"
+                    "persisted request lacks safe transport or graph-delta reconciliation evidence"
                 )
             snapshot = await backend.snapshot(identity.conversation_id)
             if snapshot.graph is None:

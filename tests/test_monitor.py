@@ -53,3 +53,15 @@ async def test_complete_without_convergence_fails() -> None:
             ],
             stable_samples=2,
         )
+
+
+@pytest.mark.asyncio
+async def test_terminal_backend_failure_is_distinct_from_convergence() -> None:
+    from playwright_gpt_core.errors import BackendError
+
+    with pytest.raises(BackendError):
+        await monitor_snapshots(
+            IDENTITY,
+            [("FAILED", snapshot("not-a-success"))],
+            stable_samples=2,
+        )

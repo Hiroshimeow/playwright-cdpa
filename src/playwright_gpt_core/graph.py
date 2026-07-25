@@ -97,39 +97,7 @@ class GraphResolver:
         self.identity = identity
 
     def resolve(self, conversation: dict[str, Any]) -> GraphCandidate:
-        if not self.identity.monitorable:
-            raise IdentityMissingError(
-                "conversation_id, exact user_message_id, and turn correlation are required"
-            )
-        mapping = conversation.get("mapping")
-        current = conversation.get("current_node")
-        if not isinstance(mapping, dict) or not isinstance(current, str) or current not in mapping:
-            raise IdentityMissingError("conversation graph has no valid current branch")
-        chain = self._current_chain(mapping, current)
-        try:
-            user_index = chain.index(self.identity.user_message_id or "")
-        except ValueError as exc:
-            raise IdentityMissingError(
-                "submitted user node is absent from the current branch"
-            ) from exc
-        user_node = mapping[self.identity.user_message_id or ""]
-        if not isinstance(user_node, dict):
-            raise IdentityMissingError("submitted user node is malformed")
-        parent = user_node.get("parent")
-        if self.identity.parent_message_id is not None and str(parent) != self.identity.parent_message_id:
-            raise ConflictingIdentityError(
-                "submitted user node parent does not match durable identity"
-            )
-        if (
-            self.identity.pre_send_current_node is not None
-            and str(parent) != self.identity.pre_send_current_node
-        ):
-            raise ConflictingIdentityError(
-                "submitted user node does not descend from pre-Send anchor"
-            )
-
-        exact_nodes = chain[user_index:]
-        self._validate_chain_correlation(mapping, exact_nodes)
+        mapping, exact_nodes = self.validate_exact_branch(conversation)
         self._validate_tool_state(mapping, exact_nodes)
 
         selected: GraphCandidate | None = None
@@ -170,6 +138,43 @@ class GraphResolver:
             )
         return selected
 
+    def validate_exact_branch(
+        self, conversation: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[str]]:
+        if not self.identity.monitorable:
+            raise IdentityMissingError(
+                "conversation_id, exact user_message_id, and graph correlation are required"
+            )
+        mapping = conversation.get("mapping")
+        current = conversation.get("current_node")
+        if not isinstance(mapping, dict) or not isinstance(current, str) or current not in mapping:
+            raise IdentityMissingError("conversation graph has no valid current branch")
+        chain = self._current_chain(mapping, current)
+        try:
+            user_index = chain.index(self.identity.user_message_id or "")
+        except ValueError as exc:
+            raise IdentityMissingError(
+                "submitted user node is absent from the current branch"
+            ) from exc
+        user_node = mapping[self.identity.user_message_id or ""]
+        if not isinstance(user_node, dict):
+            raise IdentityMissingError("submitted user node is malformed")
+        parent = user_node.get("parent")
+        if self.identity.parent_message_id is not None and str(parent) != self.identity.parent_message_id:
+            raise ConflictingIdentityError(
+                "submitted user node parent does not match durable identity"
+            )
+        if (
+            self.identity.pre_send_current_node is not None
+            and str(parent) != self.identity.pre_send_current_node
+        ):
+            raise ConflictingIdentityError(
+                "submitted user node does not descend from pre-Send anchor"
+            )
+        exact_nodes = chain[user_index:]
+        self._validate_chain_correlation(mapping, exact_nodes)
+        return mapping, exact_nodes
+
     def observe_fingerprints(self, conversation: dict[str, Any]) -> dict[str, str]:
         return graph_fingerprints(conversation)
 
@@ -200,7 +205,7 @@ class GraphResolver:
             raise IdentityMissingError("exact chain has no positive turn correlation")
 
     def _validate_tool_state(self, mapping: dict[str, Any], exact_nodes: list[str]) -> None:
-        unresolved_tool = False
+        pending_tool_calls = 0
         for node_id in exact_nodes[1:]:
             node = mapping.get(node_id)
             if not isinstance(node, dict):
@@ -213,13 +218,17 @@ class GraphResolver:
             recipient = str(message.get("recipient") or "all")
             status = str(message.get("status") or "").casefold()
             if role == "assistant" and recipient not in {"", "all"}:
-                unresolved_tool = status not in _TERMINAL_STATUSES | _FAILURE_STATUSES
+                if status not in _FAILURE_STATUSES:
+                    pending_tool_calls += 1
             elif role == "tool":
-                unresolved_tool = status not in _TERMINAL_STATUSES | _FAILURE_STATUSES
-            elif role == "assistant" and recipient in {"", "all"}:
-                unresolved_tool = False
-        if unresolved_tool:
-            raise IdentityMissingError("exact tool chain is not terminal")
+                if status not in _TERMINAL_STATUSES | _FAILURE_STATUSES:
+                    raise IdentityMissingError("exact tool result is not terminal")
+                if pending_tool_calls > 0:
+                    pending_tool_calls -= 1
+        if pending_tool_calls:
+            raise IdentityMissingError(
+                f"exact tool chain has {pending_tool_calls} unresolved call(s)"
+            )
 
     @staticmethod
     def _chain_fingerprint(mapping: dict[str, Any], exact_nodes: list[str]) -> str:

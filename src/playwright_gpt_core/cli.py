@@ -94,6 +94,8 @@ def exit_code(result: Result, *, command: str) -> int:
         return EXIT_SUCCESS
     if result.state == TurnState.CANCELLED:
         return EXIT_CANCELLED
+    if command == "cancel" and result.state == TurnState.COMPLETE:
+        return EXIT_SUCCESS
     if result.success:
         return EXIT_SUCCESS
     failure = result.failure

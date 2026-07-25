@@ -30,6 +30,7 @@ def test_cli_acceptance_surface_requires_explicit_target() -> None:
 
 def test_stable_exit_codes() -> None:
     assert exit_code(Result(1, "r", TurnState.CANCELLED), command="cancel") == EXIT_CANCELLED
+    assert exit_code(Result(1, "r", TurnState.COMPLETE), command="cancel") == 0
     assert (
         exit_code(
             Result(

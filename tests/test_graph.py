@@ -128,3 +128,69 @@ def test_same_message_id_mutation_changes_fingerprint() -> None:
         status="finished_successfully",
     )[1]
     assert fingerprint_node(first) != fingerprint_node(second)
+
+
+def test_active_exact_branch_can_be_validated_without_terminal_final() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root"),
+        message(
+            "tool-call",
+            "assistant",
+            "user-1",
+            text="{}",
+            recipient="tool.backend",
+            status="in_progress",
+            content_type="code",
+        ),
+        current="tool-call",
+    )
+    _mapping, exact_nodes = GraphResolver(identity()).validate_exact_branch(snapshot)
+    assert exact_nodes == ["user-1", "tool-call"]
+
+
+def test_terminal_tool_call_result_chain_allows_final_resolution() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root"),
+        message(
+            "tool-call",
+            "assistant",
+            "user-1",
+            text="{}",
+            recipient="tool.backend",
+            status="finished_successfully",
+            content_type="code",
+        ),
+        message(
+            "tool-result",
+            "tool",
+            "tool-call",
+            text="result",
+            status="finished_successfully",
+            content_type="text",
+        ),
+        message("assistant-final", "assistant", "tool-result", text="TOOL_OK"),
+        current="assistant-final",
+    )
+    assert GraphResolver(identity()).resolve(snapshot).text == "TOOL_OK"
+
+
+def test_tool_call_without_result_blocks_final_candidate() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root"),
+        message(
+            "tool-call",
+            "assistant",
+            "user-1",
+            text="{}",
+            recipient="tool.backend",
+            status="finished_successfully",
+            content_type="code",
+        ),
+        message("assistant-final", "assistant", "tool-call", text="UNPROVEN"),
+        current="assistant-final",
+    )
+    with pytest.raises(IdentityMissingError):
+        GraphResolver(identity()).resolve(snapshot)
