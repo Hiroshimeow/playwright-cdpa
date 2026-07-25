@@ -13,6 +13,71 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _validate_helper_target_id(value: str) -> str:
+    if type(value) is not str:
+        raise ValueError("helper_page_target_id must be a string")
+    if not value or len(value) > 256:
+        raise ValueError("helper_page_target_id must contain 1 to 256 characters")
+    if any(ord(character) < 0x21 or ord(character) > 0x7E for character in value):
+        raise ValueError("helper_page_target_id must contain printable ASCII without spaces")
+    return value
+
+
+def _validate_helper_closed_at(value: str) -> str:
+    if not value or len(value) > 64:
+        raise ValueError("helper_page_closed_at must be a bounded ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("helper_page_closed_at must be an ISO timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("helper_page_closed_at must include a timezone")
+    return value
+
+
+def _decode_helper_ownership(
+    value: dict[str, Any], raw_schema: int
+) -> tuple[str | None, bool, str | None]:
+    if raw_schema < 4:
+        return None, False, None
+
+    required = (
+        "helper_page_target_id",
+        "helper_page_keep",
+        "helper_page_closed_at",
+    )
+    for field_name in required:
+        if field_name not in value:
+            raise ValueError(f"schema 4 requires {field_name}")
+
+    raw_target = value["helper_page_target_id"]
+    if raw_target is None:
+        target_id = None
+    elif type(raw_target) is not str:
+        raise ValueError("helper_page_target_id must be a string or null")
+    else:
+        target_id = _validate_helper_target_id(raw_target)
+
+    raw_keep = value["helper_page_keep"]
+    if type(raw_keep) is not bool:
+        raise ValueError("helper_page_keep must be exactly boolean")
+    keep = raw_keep
+
+    raw_closed_at = value["helper_page_closed_at"]
+    if raw_closed_at is None:
+        closed_at = None
+    elif type(raw_closed_at) is not str:
+        raise ValueError("helper_page_closed_at must be a string or null")
+    else:
+        closed_at = _validate_helper_closed_at(raw_closed_at)
+
+    if target_id is None and keep:
+        raise ValueError("helper_page_keep=true requires helper_page_target_id")
+    if target_id is None and closed_at is not None:
+        raise ValueError("helper_page_closed_at requires helper_page_target_id")
+    return target_id, keep, closed_at
+
+
 class TurnState(str, Enum):
     NEW = "NEW"
     PREPARING = "PREPARING"
@@ -280,8 +345,9 @@ class TurnRecord:
         return replace(self, cancellation_requested_at=utc_now(), updated_at=utc_now())
 
     def with_helper_page(self, target_id: str, *, keep: bool) -> TurnRecord:
-        if not target_id or len(target_id) > 256:
-            raise ValueError("helper target ID is invalid")
+        if type(keep) is not bool:
+            raise ValueError("helper_page_keep must be exactly boolean")
+        target_id = _validate_helper_target_id(target_id)
         if self.helper_page_target_id not in {None, target_id}:
             raise ValueError("helper target identity cannot change")
         return replace(
@@ -371,6 +437,9 @@ class TurnRecord:
                 )
             migrated["sources"] = sources
             raw_identity = migrated
+        helper_target_id, helper_keep, helper_closed_at = _decode_helper_ownership(
+            value, raw_schema
+        )
         return cls(
             schema_version=4,
             request_id=str(value["request_id"]),
@@ -405,17 +474,9 @@ class TurnRecord:
                 if value.get("cancellation_requested_at")
                 else None
             ),
-            helper_page_target_id=(
-                str(value["helper_page_target_id"])
-                if value.get("helper_page_target_id")
-                else None
-            ),
-            helper_page_keep=bool(value.get("helper_page_keep", False)),
-            helper_page_closed_at=(
-                str(value["helper_page_closed_at"])
-                if value.get("helper_page_closed_at")
-                else None
-            ),
+            helper_page_target_id=helper_target_id,
+            helper_page_keep=helper_keep,
+            helper_page_closed_at=helper_closed_at,
         )
 
 

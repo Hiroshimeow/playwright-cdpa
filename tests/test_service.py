@@ -343,3 +343,71 @@ async def test_terminal_request_retries_exact_helper_cleanup(
     assert persisted.helper_page_closed_at is not None
     assert helper.closed is True
     assert unrelated.closed is False
+
+
+class _ForbiddenBrowserSession:
+    entered = False
+
+    def __init__(self, _config) -> None:
+        type(self).entered = True
+        raise AssertionError("browser session must not be constructed for corrupt state")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "changes"),
+    [
+        ("watch", {"helper_page_keep": []}),
+        ("watch", {"helper_page_closed_at": 123}),
+        ("cancel", {"helper_page_target_id": 123}),
+        (
+            "cancel",
+            {
+                "helper_page_target_id": None,
+                "helper_page_closed_at": "2026-07-25T08:00:00+00:00",
+            },
+        ),
+    ],
+)
+async def test_malformed_helper_state_fails_before_browser_or_ownership_mutation(
+    tmp_path, monkeypatch, operation, changes
+) -> None:
+    import json
+
+    import playwright_gpt_core.service as service_module
+    from playwright_gpt_core.errors import CorruptStateError
+
+    conversation_id = "corrupt-helper-conversation"
+    request_id = "corrupt-helper-request"
+    core = ChatGPTCore(CoreConfig(state_dir=tmp_path))
+    value = TurnRecord.new(
+        request_id=request_id,
+        prompt="prompt",
+        target_kind="conversation",
+        target_conversation_id=conversation_id,
+    ).transition(TurnState.CANCELLED).to_dict()
+    value.update(
+        {
+            "helper_page_target_id": "owned-target",
+            "helper_page_keep": False,
+            "helper_page_closed_at": None,
+        }
+    )
+    value.update(changes)
+    path = core.store.turn_path(request_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(value, sort_keys=True) + "\n"
+    path.write_text(raw, encoding="utf-8")
+    claim = core.store.claim_conversation(conversation_id, request_id)
+    original_revision = claim.revision
+    _ForbiddenBrowserSession.entered = False
+    monkeypatch.setattr(service_module, "BrowserSession", _ForbiddenBrowserSession)
+
+    with pytest.raises(CorruptStateError):
+        await getattr(core, operation)(request_id)
+
+    assert _ForbiddenBrowserSession.entered is False
+    assert path.read_text(encoding="utf-8") == raw
+    unchanged = core.store.load_conversation(conversation_id)
+    assert unchanged.active_request_id == request_id
+    assert unchanged.revision == original_revision
