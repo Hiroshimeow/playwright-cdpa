@@ -240,6 +240,17 @@ def _secret_key(key: str) -> bool:
     )
 
 
+def _plain_text_has_secret_boundary(value: str) -> bool:
+    if _COOKIE_HEADER.search(value):
+        return True
+    if _AUTHORIZATION_HEADER.search(value) or _AUTH_SCHEME.search(value) or _JWT.search(value):
+        return True
+    return any(
+        _secret_key(match.group("label"))
+        for match in _UNQUOTED_ASSIGNMENT_CANDIDATE.finditer(value)
+    )
+
+
 def _path_secret_marker(segment: str) -> bool:
     normalized, _compact = _normalize_secret_label(segment)
     return normalized in _PATH_SECRET_CONTEXTS or _secret_key(segment)
@@ -447,17 +458,18 @@ def _malformed_secret_quoted_key(raw: str, quote_character: str) -> bool:
     separator_positions = [
         position for position, character in enumerate(raw) if character in ":="
     ]
-    if not separator_positions:
-        return False
+    candidate_positions = separator_positions or [len(raw)]
 
-    for position in reversed(separator_positions):
+    for position in reversed(candidate_positions):
         prefix = raw[:position].strip(" \t\"'")
         if not prefix:
             continue
         if len(prefix) > _MAX_QUOTED_KEY_RAW:
             return True
         decoded_key = _decode_quoted_key(prefix, quote_character)
-        if decoded_key is None or _secret_key(decoded_key):
+        if decoded_key is None:
+            return True
+        if _secret_key(decoded_key) or _plain_text_has_secret_boundary(decoded_key):
             return True
     return False
 
@@ -479,6 +491,10 @@ def _sanitize_quoted_assignments(value: str) -> tuple[str, bool]:
 
         close = _quoted_key_close(value, cursor)
         if close is None:
+            before_quote = value[:cursor].rstrip()
+            if before_quote.endswith((":", "=")):
+                cursor += 1
+                continue
             line_end = len(value)
             newline = re.search(r"[\r\n]", value[cursor + 1 :])
             if newline is not None:
@@ -492,6 +508,10 @@ def _sanitize_quoted_assignments(value: str) -> tuple[str, bool]:
         while separator_start < len(value) and value[separator_start].isspace():
             separator_start += 1
         if separator_start >= len(value) or value[separator_start] not in ":=":
+            before_quote = value[:cursor].rstrip()
+            if before_quote.endswith((":", "=")):
+                cursor = close + 1
+                continue
             raw_key = value[cursor + 1 : close]
             if _malformed_secret_quoted_key(raw_key, value[cursor]):
                 return _REDACTED, True
@@ -603,9 +623,7 @@ def _sanitize_plain_text(value: str) -> str:
     return value
 
 
-def sanitize_diagnostic(value: Any, *, max_length: int = _MAX_DIAGNOSTIC) -> str:
-    text = value if isinstance(value, str) else str(value)
-    text = text[: max(max_length * 4, max_length)]
+def _sanitize_unstructured_diagnostic(text: str, *, max_length: int) -> str:
     if _COOKIE_HEADER.search(text):
         return _REDACTED
     text = _URL.sub(lambda match: _sanitize_url(match.group(0)), text)
@@ -616,6 +634,68 @@ def sanitize_diagnostic(value: Any, *, max_length: int = _MAX_DIAGNOSTIC) -> str
     if len(text) > max_length:
         text = text[:max_length] + f"...<truncated:{len(text) - max_length}>"
     return text
+
+
+def _sanitize_json_string_values(text: str, *, max_length: int) -> str | None:
+    if not text.lstrip().startswith(("{", "[")):
+        return None
+    try:
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+        return None
+    if not isinstance(decoded, (dict, list)):
+        return None
+
+    text, failed_closed = _sanitize_quoted_assignments(text)
+    if failed_closed:
+        return text
+
+    replacements: list[tuple[int, int, str]] = []
+    cursor = 0
+    while cursor < len(text):
+        if text[cursor] != '"' or _is_escaped(text, cursor):
+            cursor += 1
+            continue
+        close = _quoted_key_close(text, cursor)
+        if close is None:
+            return _REDACTED
+        after = close + 1
+        while after < len(text) and text[after].isspace():
+            after += 1
+        if after < len(text) and text[after] == ":":
+            cursor = close + 1
+            continue
+
+        raw_value = text[cursor + 1 : close]
+        try:
+            decoded_value = json.loads(f'"{raw_value}"')
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return _REDACTED
+        if not isinstance(decoded_value, str):
+            return _REDACTED
+        sanitized = _sanitize_unstructured_diagnostic(
+            decoded_value,
+            max_length=max_length,
+        )
+        if sanitized != decoded_value:
+            encoded = json.dumps(sanitized, ensure_ascii=False)[1:-1]
+            replacements.append((cursor + 1, close, encoded))
+        cursor = close + 1
+
+    for start, end, replacement in reversed(replacements):
+        text = text[:start] + replacement + text[end:]
+    if len(text) > max_length:
+        return _REDACTED
+    return text
+
+
+def sanitize_diagnostic(value: Any, *, max_length: int = _MAX_DIAGNOSTIC) -> str:
+    text = value if isinstance(value, str) else str(value)
+    text = text[: max(max_length * 4, max_length)]
+    structured = _sanitize_json_string_values(text, max_length=max_length)
+    if structured is not None:
+        return structured
+    return _sanitize_unstructured_diagnostic(text, max_length=max_length)
 
 
 def _redact_string(value: str) -> str:

@@ -961,3 +961,57 @@ def test_state_write_fails_closed_for_internal_delimiter_canonical_secret_key(
 
     assert forbidden not in raw
     assert parsed["failure"]["message"] == "<redacted>"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "state-json-value-auth-colon",
+            r'{"message":"Authorization\u003a Custom STATE-JSON-VALUE-AUTH","mode":"inspect"}',
+            "STATE-JSON-VALUE-AUTH",
+        ),
+        (
+            "state-json-value-proxy",
+            r'{"message":"Proxy-Authoriz\u0061tion\u003a Digest '
+            r'STATE-JSON-VALUE-PROXY","mode":"inspect"}',
+            "STATE-JSON-VALUE-PROXY",
+        ),
+        (
+            "state-json-value-cookie",
+            r'{"message":"Cookie\u003a session=STATE-JSON-VALUE-COOKIE; Secure",'
+            r'"mode":"inspect"}',
+            "STATE-JSON-VALUE-COOKIE",
+        ),
+        (
+            "state-json-value-set-cookie",
+            r'{"message":"Set-Cook\u0069e\u003d '
+            r'session=STATE-JSON-VALUE-SET-COOKIE; Secure","mode":"inspect"}',
+            "STATE-JSON-VALUE-SET-COOKIE",
+        ),
+        (
+            "state-fully-escaped-malformed",
+            r'{"headers\u003aAuthoriz\u0061tion\u003a STATE-FULLY-ESCAPED-MALFORMED',
+            "STATE-FULLY-ESCAPED-MALFORMED",
+        ),
+    ],
+)
+def test_state_write_sanitizes_escaped_diagnostic_value_boundaries(
+    tmp_path, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+
+    assert forbidden not in raw
+    assert "<redacted>" in raw
+    assert (
+        parsed["failure"]["message"] == "<redacted>"
+        or "inspect" in parsed["failure"]["message"]
+    )

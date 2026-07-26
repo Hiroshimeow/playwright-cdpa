@@ -1691,3 +1691,106 @@ def test_missing_close_internal_delimiter_nonsecret_key_remains_visible() -> Non
     diagnostic = r'{"mode:display\u002ename: PUBLIC-INTERNAL-CONTEXT'
 
     assert sanitize_diagnostic(diagnostic) == diagnostic
+
+
+_ESCAPED_DIAGNOSTIC_VALUE_CASES = [
+    (
+        f'{{"message":"{label}{delimiter} {value}","mode":"inspect"}}',
+        canary,
+    )
+    for label, value, canary in (
+        ("Authorization", "Custom JSON-VALUE-AUTH", "JSON-VALUE-AUTH"),
+        (r"Authoriz\u0061tion", "Custom JSON-VALUE-UNICODE-AUTH", "JSON-VALUE-UNICODE-AUTH"),
+        (
+            r"Proxy-Authoriz\u0061tion",
+            "Digest JSON-VALUE-PROXY",
+            "JSON-VALUE-PROXY",
+        ),
+        (
+            r"Set-Cook\u0069e",
+            "session=JSON-VALUE-SET-COOKIE; Secure",
+            "JSON-VALUE-SET-COOKIE",
+        ),
+        ("Cookie", "session=JSON-VALUE-COOKIE; Secure", "JSON-VALUE-COOKIE"),
+    )
+    for delimiter in (r"\u003a", r"\u003d")
+]
+
+
+@pytest.mark.parametrize(("diagnostic", "canary"), _ESCAPED_DIAGNOSTIC_VALUE_CASES)
+def test_valid_json_escaped_diagnostic_values_are_canonically_sanitized(
+    diagnostic: str, canary: str
+) -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    direct = sanitize_diagnostic(diagnostic)
+    nested = safe_json_dumps({"failure": {"message": diagnostic}})
+    failure = json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict())
+
+    assert isinstance(json.loads(direct), dict)
+    for output in (direct, nested, failure):
+        assert canary not in output
+        assert "<redacted>" in output
+        assert "inspect" in output
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        r'{"message":"legal_authorization\u003a allowed","mode":"inspect"}',
+        r'{"message":"marketing_cookie\u003a enabled","mode":"inspect"}',
+        r'{"message":"authorization_status\u003a denied","mode":"inspect"}',
+    ],
+)
+def test_valid_json_escaped_ordinary_diagnostic_values_remain_visible(
+    diagnostic: str,
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+    parsed = json.loads(rendered)
+
+    assert parsed["mode"] == "inspect"
+    assert parsed["message"].split()[-1] in {"allowed", "enabled", "denied"}
+    assert "<redacted>" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "canary"),
+    [
+        (
+            r'{"Authoriz\u0061tion\u003a FULLY-ESCAPED-MALFORMED-AUTH',
+            "FULLY-ESCAPED-MALFORMED-AUTH",
+        ),
+        (
+            r'{"headers\u003aAuthoriz\u0061tion\u003a FULLY-ESCAPED-MALFORMED-QUALIFIED',
+            "FULLY-ESCAPED-MALFORMED-QUALIFIED",
+        ),
+        (
+            r'{"Set-Cook\u0069e\u003a session=FULLY-ESCAPED-MALFORMED-COOKIE',
+            "FULLY-ESCAPED-MALFORMED-COOKIE",
+        ),
+    ],
+)
+def test_missing_close_fully_escaped_delimiters_fail_closed(
+    diagnostic: str, canary: str
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert canary not in rendered
+
+
+def test_valid_json_quoted_value_decoder_handles_slash_quote_and_backslash_escapes() -> None:
+    diagnostic = (
+        r'{"message":"Authorization\u003a Custom ESCAPED\/SLASH'
+        r'\\BACKSLASH\"QUOTE","mode":"inspect"}'
+    )
+
+    rendered = sanitize_diagnostic(diagnostic)
+    parsed = json.loads(rendered)
+
+    assert parsed["mode"] == "inspect"
+    assert parsed["message"] == "Authorization: <redacted>"
+    assert "ESCAPED" not in rendered
+    assert "SLASH" not in rendered
+    assert "BACKSLASH" not in rendered
+    assert "QUOTE" not in rendered

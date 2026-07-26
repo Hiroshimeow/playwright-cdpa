@@ -870,3 +870,63 @@ def test_get_json_does_not_print_internal_delimiter_canonical_secret_values(
     assert forbidden not in captured.err
     assert parsed["failure"]["message"] == "<redacted>"
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-json-value-auth-colon",
+            r'{"message":"Authorization\u003a Custom CLI-JSON-VALUE-AUTH","mode":"inspect"}',
+            "CLI-JSON-VALUE-AUTH",
+        ),
+        (
+            "cli-json-value-auth-equals",
+            r'{"message":"Authoriz\u0061tion\u003d Custom '
+            r'CLI-JSON-VALUE-UNICODE-AUTH","mode":"inspect"}',
+            "CLI-JSON-VALUE-UNICODE-AUTH",
+        ),
+        (
+            "cli-json-value-proxy",
+            r'{"message":"Proxy-Authoriz\u0061tion\u003a Digest '
+            r'CLI-JSON-VALUE-PROXY","mode":"inspect"}',
+            "CLI-JSON-VALUE-PROXY",
+        ),
+        (
+            "cli-json-value-cookie",
+            r'{"message":"Cookie\u003a session=CLI-JSON-VALUE-COOKIE; Secure",'
+            r'"mode":"inspect"}',
+            "CLI-JSON-VALUE-COOKIE",
+        ),
+        (
+            "cli-json-value-set-cookie",
+            r'{"message":"Set-Cook\u0069e\u003d '
+            r'session=CLI-JSON-VALUE-SET-COOKIE; Secure","mode":"inspect"}',
+            "CLI-JSON-VALUE-SET-COOKIE",
+        ),
+        (
+            "cli-fully-escaped-malformed",
+            r'{"headers\u003aAuthoriz\u0061tion\u003a CLI-FULLY-ESCAPED-MALFORMED',
+            "CLI-FULLY-ESCAPED-MALFORMED",
+        ),
+    ],
+)
+def test_get_json_does_not_print_escaped_diagnostic_value_secrets(
+    tmp_path, capsys, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+
+    assert code == 20
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert "<redacted>" in parsed["failure"]["message"]
+    assert captured.err == ""
