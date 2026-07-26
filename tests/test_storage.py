@@ -431,3 +431,36 @@ def test_state_write_removes_complete_multiword_passphrase(tmp_path) -> None:
     assert "<redacted>" in raw
     assert "retry later" in raw
     assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "quoted-key-secret",
+            '{"passphrase": "STATE QUOTED SECRET", "mode": "inspect"}',
+            ("STATE", "QUOTED", "SECRET"),
+        ),
+        (
+            "set-cookie-secret",
+            "Set-Cookie: arbitrary_name=STATE-COOKIE-SECRET; HttpOnly",
+            ("STATE-COOKIE-SECRET",),
+        ),
+    ],
+)
+def test_state_write_sanitizes_quoted_keys_and_explicit_cookie_headers(
+    tmp_path, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    for secret in forbidden:
+        assert secret not in raw
+    assert "<redacted>" in raw
+    assert isinstance(json.loads(raw), dict)

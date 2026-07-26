@@ -446,3 +446,76 @@ def test_cookie_headers_and_multi_pair_cookie_blobs_remain_fully_redacted(
 
     assert rendered == "<redacted>"
     assert "COOKIE" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "secret_parts", "preserved"),
+    [
+        (
+            '{"passphrase": "correct horse battery staple", "mode": "inspect"}',
+            ("correct", "horse", "battery", "staple"),
+            '"mode": "inspect"',
+        ),
+        (
+            "{'passphrase': 'correct horse battery staple', 'mode': 'inspect'}",
+            ("correct", "horse", "battery", "staple"),
+            "'mode': 'inspect'",
+        ),
+        (
+            '{"aws_secret_access_key":"QUOTED-CLOUD-SECRET", "status":"failed"}',
+            ("QUOTED-CLOUD-SECRET",),
+            '"status":"failed"',
+        ),
+        (
+            "prefix 'qualifiedPassphrase' = 'correct horse battery staple'; retry later",
+            ("correct", "horse", "battery", "staple"),
+            "retry later",
+        ),
+    ],
+)
+def test_quoted_secret_keys_are_sanitized_with_bounded_context(
+    diagnostic: str, secret_parts: tuple[str, ...], preserved: str
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    for secret in secret_parts:
+        assert secret not in rendered
+    assert "<redacted>" in rendered
+    assert preserved in rendered
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "Set-Cookie: arbitrary_name=SET-COOKIE-SECRET; HttpOnly",
+        "Cookie: arbitrary_name=COOKIE-HEADER-SECRET",
+        "backend response Set-Cookie: arbitrary_name=EMBEDDED-COOKIE-SECRET; Secure",
+    ],
+)
+def test_explicit_single_pair_cookie_headers_are_fully_redacted(diagnostic: str) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert "SECRET" not in rendered
+
+
+def test_single_raw_key_value_without_cookie_provenance_remains_diagnostic_context() -> None:
+    diagnostic = "arbitrary_name=ordinary-value; HttpOnly flag observed"
+
+    assert sanitize_diagnostic(diagnostic) == diagnostic
+
+
+def test_quoted_keys_and_set_cookie_are_removed_from_nested_diagnostic_and_failure() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostics = [
+        '{"passphrase": "NESTED QUOTED SECRET", "mode": "inspect"}',
+        "Set-Cookie: arbitrary_name=NESTED-COOKIE-SECRET; HttpOnly",
+    ]
+    for diagnostic in diagnostics:
+        nested = safe_json_dumps({"failure": {"message": diagnostic}})
+        failure = json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict())
+        for output in (nested, failure):
+            assert "NESTED" not in output
+            assert "SECRET" not in output
+            assert "<redacted>" in output

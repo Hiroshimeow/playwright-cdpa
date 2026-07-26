@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from playwright_gpt_core.cli import (
     EXIT_AMBIGUOUS,
     EXIT_CANCELLED,
@@ -308,3 +310,40 @@ def test_get_json_does_not_print_multiword_passphrase_tail(tmp_path, capsys) -> 
     assert "<redacted>" in captured.out
     assert "retry later" in captured.out
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-quoted-key-secret",
+            '{"aws_secret_access_key":"CLI-QUOTED-SECRET", "mode":"inspect"}',
+            ("CLI-QUOTED-SECRET",),
+        ),
+        (
+            "cli-set-cookie-secret",
+            "Set-Cookie: arbitrary_name=CLI-COOKIE-SECRET; HttpOnly",
+            ("CLI-COOKIE-SECRET",),
+        ),
+    ],
+)
+def test_get_json_does_not_print_quoted_keys_or_explicit_cookie_headers(
+    tmp_path, capsys, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", record.request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    for secret in forbidden:
+        assert secret not in captured.out
+        assert secret not in captured.err
+    assert "<redacted>" in captured.out
+    assert captured.err == ""
+    assert json.loads(captured.out)["failure"]["category"] == "invariant"

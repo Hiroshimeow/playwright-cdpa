@@ -904,3 +904,87 @@ Python 3.14.0:  312 passed, 5 xfailed
 ```
 
 The five xfails remain immutable prototype characterization tests. Existing hard-cancellation and external-schema limitations are unchanged.
+
+## Replacement DEV turn 9 — quoted diagnostic keys and explicit cookie headers
+
+Date: 2026-07-26
+
+### Quoted-key assignment boundary
+
+The free-form sanitizer now recognizes the following bounded key forms before `:` or `=`:
+
+```text
+passphrase=...
+"passphrase": ...
+'passphrase': ...
+"aws_secret_access_key"=...
+```
+
+Single and double quotes must match. The unquoted key text is classified by the existing normalized secret predicate. Quoted values preserve their matching quote boundary around `<redacted>`, while bounded nonsecret sibling fields remain visible.
+
+Coverage includes:
+
+```text
+quoted JSON passphrase with multiple words
+quoted Python-style passphrase with multiple words
+quoted cloud-secret key
+qualified quoted passphrase key
+nested safe JSON
+Failure serialization
+durable state
+CLI JSON stdout/stderr
+```
+
+### Explicit cookie provenance
+
+`Cookie:` and `Set-Cookie:` headers containing a cookie pair are detected before URL and assignment sanitization and redact the complete diagnostic. Detection is bounded by an explicit header label plus `name=value`, and works when the header occurs inside surrounding diagnostic prose.
+
+The policy is:
+
+```text
+Cookie: one pair                 -> fully redacted
+Set-Cookie: one pair + flags     -> fully redacted
+raw two-or-more cookie pairs     -> fully redacted
+one arbitrary name=value string  -> retained unless cookie provenance is explicit
+```
+
+The last case avoids classifying every ordinary assignment as a cookie while keeping explicit cookie-bearing surfaces fail-closed.
+
+### Independent adversarial evidence
+
+```text
+quoted JSON secret removed: true
+quoted Python-style secret removed: true
+quoted cloud secret removed: true
+Set-Cookie secret removed: true
+Failure/state/CLI secret removed: true
+safe sibling context preserved: true
+single raw pair policy verified: true
+state and CLI valid JSON: true
+evidence-tree secret scan: pass
+```
+
+Raw canary values are not recorded in this report.
+
+### Exact persisted rewatch
+
+```text
+CDP /json/version HTTP: 200
+request: 3c2de378…2dd0
+exit: 0
+state: COMPLETE
+response: DEV3_OK
+stderr: 0 bytes
+```
+
+No new frontend Send was issued.
+
+### Automated evidence
+
+```text
+Python 3.11.15: 325 passed, 5 xfailed
+Python 3.12.13: 325 passed, 5 xfailed
+Python 3.14.0:  325 passed, 5 xfailed
+```
+
+The five xfails remain immutable prototype characterization tests. Existing hard-cancellation and external-schema limitations are unchanged.

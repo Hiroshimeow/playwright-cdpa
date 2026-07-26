@@ -58,12 +58,12 @@ _AUTH_SCHEME = re.compile(
 )
 _ASSIGNMENT_CANDIDATE = re.compile(
     r"(?i)(?=(?<![A-Za-z0-9_-])"
-    r"(?P<label>[A-Za-z][A-Za-z0-9_-]{0,80})"
+    r"(?P<key>(?P<quote>[\"']?)(?P<label>[A-Za-z][A-Za-z0-9_-]{0,80})(?P=quote))"
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;&]+))"
 )
 _COOKIE_VALUE = re.compile(r"(?i)(?:^|;\s*)(?:__secure-|__host-)?[A-Za-z0-9_.-]+=[^;\s]+")
-_COOKIE_HEADER = re.compile(r"(?i)^\s*cookie\s*:")
+_COOKIE_HEADER = re.compile(r"(?i)\b(?:set-cookie|cookie)\s*:\s*(?=[A-Za-z0-9_.-]+=)")
 _UNQUOTED_ASSIGNMENT_DELIMITER = re.compile(r"[,;&\r\n]")
 _URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _PATH_SECRET_CONTEXTS = {
@@ -232,7 +232,7 @@ def _assignment_value_end(value: str, match: re.Match[str]) -> int:
         end = delimiter.start()
     next_assignment = _ASSIGNMENT_CANDIDATE.search(value, search_start)
     if next_assignment is not None:
-        end = min(end, next_assignment.start("label"))
+        end = min(end, next_assignment.start("key"))
     while end > match.start("value") and value[end - 1].isspace():
         end -= 1
     return end
@@ -245,15 +245,20 @@ def _sanitize_assignments(value: str) -> str:
         label = match.group("label")
         if not _secret_key(label):
             continue
-        start = match.start("label")
+        start = match.start("key")
         end = _assignment_value_end(value, match)
         if start < last_end:
             continue
+        raw_value = match.group("value")
+        if raw_value.startswith(('"', "'")) and raw_value[-1:] == raw_value[:1]:
+            replacement_value = f"{raw_value[0]}{_REDACTED}{raw_value[0]}"
+        else:
+            replacement_value = _REDACTED
         replacements.append(
             (
                 start,
                 end,
-                f"{label}{match.group('separator')}{_REDACTED}",
+                f"{match.group('key')}{match.group('separator')}{replacement_value}",
             )
         )
         last_end = end
@@ -276,10 +281,12 @@ def _sanitize_plain_text(value: str) -> str:
 def sanitize_diagnostic(value: Any, *, max_length: int = _MAX_DIAGNOSTIC) -> str:
     text = value if isinstance(value, str) else str(value)
     text = text[: max(max_length * 4, max_length)]
+    if _COOKIE_HEADER.search(text):
+        return _REDACTED
     text = _URL.sub(lambda match: _sanitize_url(match.group(0)), text)
     text = _sanitize_plain_text(text)
     cookie_matches = list(_COOKIE_VALUE.finditer(text))
-    if _COOKIE_HEADER.match(text) or len(cookie_matches) >= 2:
+    if len(cookie_matches) >= 2:
         text = _REDACTED
     if len(text) > max_length:
         text = text[:max_length] + f"...<truncated:{len(text) - max_length}>"

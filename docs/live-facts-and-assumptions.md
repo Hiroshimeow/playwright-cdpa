@@ -143,3 +143,12 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - An adversarial harness confirmed sibling recovery failed closed and retained ownership. A generated multi-word passphrase canary was absent from diagnostics, nested JSON, `Failure`, durable state, CLI stdout/stderr, and the evidence tree; state and CLI output remained valid JSON and safe context survived.
 - Full suites pass on Python 3.11, 3.12, and 3.14 with `312 passed, 5 xfailed`.
 - Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes without a new Send.
+
+## Replacement DEV turn 9 quoted-key and cookie-header facts — July 26, 2026
+
+- The free-form assignment grammar now accepts bounded keys with no quote or with matching single/double quotes. The unquoted key text is passed to the existing normalized secret predicate; quoted values retain matching quote boundaries and safe sibling fields remain visible.
+- Explicit `Cookie:` and `Set-Cookie:` headers containing a cookie pair are detected before URL or assignment transformations and redact the complete diagnostic, including embedded header text. Multi-pair raw cookie blobs remain fail-closed.
+- A single arbitrary `name=value` string without explicit cookie provenance is intentionally not classified as a cookie because arbitrary diagnostic assignments are indistinguishable from cookie pairs. The fail-closed cookie boundary is explicit header provenance or multiple cookie pairs.
+- Generated quoted JSON, Python-style, cloud-secret, and `Set-Cookie` canaries were absent from direct diagnostics, nested JSON, `Failure`, durable state, CLI stdout/stderr, and the evidence tree. Safe nonsecret sibling fields remained visible and state/CLI output remained valid JSON.
+- Full suites pass on Python 3.11, 3.12, and 3.14 with `325 passed, 5 xfailed`.
+- Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes without a new Send.
