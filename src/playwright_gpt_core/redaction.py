@@ -1005,6 +1005,7 @@ def redact(value: Any, *, _depth: int = 0) -> Any:
         for raw_key, raw_value in value.items():
             raw_key_text = raw_key if isinstance(raw_key, str) else str(raw_key)
             key = sanitize_diagnostic(raw_key_text, max_length=_MAX_MAPPING_KEY)
+            unsafe_key = False
             try:
                 canonical_secret = _canonical_json_key_is_secret(
                     raw_key_text,
@@ -1012,6 +1013,11 @@ def redact(value: Any, *, _depth: int = 0) -> Any:
                 )
             except ValueError:
                 canonical_secret = True
+                unsafe_key = True
+            if unsafe_key:
+                key = _REDACTED
+            if key in output:
+                return {_REDACTED: _REDACTED}
             value_is_secret = (
                 len(raw_key_text) > _MAX_MAPPING_KEY or _secret_key(key) or canonical_secret
             )

@@ -1427,3 +1427,50 @@ def test_state_write_does_not_persist_secret_assignments_in_json_key_tokens(
 
     assert canary not in raw
     assert json.loads(raw)["failure"]["message"] == "<redacted>"
+
+
+class _Turn23StringifiedKey:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __str__(self) -> str:
+        return self.text
+
+
+@pytest.mark.parametrize(
+    ("prefix", "codepoint", "suffix", "label"),
+    [
+        ("Authorization", "003a", " Custom ", "AUTH"),
+        ("Proxy-Authorization", "003a", " Digest response=", "PROXY"),
+        ("Cookie", "003a", " session=", "COOKIE"),
+        ("Set-Cookie", "003a", " session=", "SET-COOKIE"),
+        ("access_token", "003d", "", "ACCESS"),
+        ("proof_token", "003d", "", "PROOF"),
+    ],
+)
+@pytest.mark.parametrize("layers", range(1, 7))
+@pytest.mark.parametrize("native_string", [True, False])
+def test_atomic_json_redacts_native_secret_bearing_output_keys(
+    tmp_path,
+    prefix: str,
+    codepoint: str,
+    suffix: str,
+    label: str,
+    layers: int,
+    native_string: bool,
+) -> None:
+    key_text = prefix + _native_mapping_unicode_escape_layers(codepoint, layers) + suffix
+    canary = f"ATOMIC-KEY-TOKEN-{label}-DEPTH-{layers}"
+    raw_key = key_text + canary
+    key = raw_key if native_string else _Turn23StringifiedKey(raw_key)
+    path = tmp_path / f"turn23-{label.lower()}-{layers}-{native_string}.json"
+    store = StateStore(tmp_path / "state")
+
+    store._atomic_json(path, {key: "ordinary", "mode": "inspect"})
+    raw = path.read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+
+    assert canary not in raw
+    assert parsed["<redacted>"] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+    assert json.loads(json.dumps(parsed, sort_keys=True)) == parsed

@@ -2549,3 +2549,92 @@ def test_over_budget_structured_families_fail_closed_before_fallback(
 
     assert rendered == "<redacted>"
     assert canary not in rendered
+
+
+_NATIVE_SECRET_BEARING_KEY_CASES = [
+    (
+        prefix + _compact_unicode_escape_layers(codepoint, layers) + suffix + canary,
+        canary,
+        layers,
+    )
+    for prefix, codepoint, suffix, label in (
+        ("Authorization", "003a", " Custom ", "AUTH-CUSTOM"),
+        ("Authorization", "003a", " Bearer ", "AUTH-BEARER"),
+        ("Authorization", "003a", " Basic ", "AUTH-BASIC"),
+        ("Proxy-Authorization", "003a", " Digest response=", "PROXY"),
+        ("Cookie", "003a", " session=", "COOKIE"),
+        ("Set-Cookie", "003a", " session=", "SET-COOKIE"),
+        ("access_token", "003d", "", "ACCESS"),
+        ("proof_token", "003d", "", "PROOF"),
+    )
+    for layers in range(1, 7)
+    for canary in (f"NATIVE-KEY-TOKEN-{label}-DEPTH-{layers}",)
+]
+
+
+@pytest.mark.parametrize(("key_text", "canary", "layers"), _NATIVE_SECRET_BEARING_KEY_CASES)
+@pytest.mark.parametrize("native_string", [True, False])
+def test_native_mapping_secret_bearing_key_tokens_redact_output_key(
+    key_text: str, canary: str, layers: int, native_string: bool
+) -> None:
+    raw_key = key_text if native_string else _StringifiedMappingKey(key_text)
+    value = {raw_key: "ordinary", "mode": "inspect"}
+
+    cleaned = redact(value)
+    rendered = safe_json_dumps(value)
+    parsed = json.loads(rendered)
+
+    assert canary not in json.dumps(cleaned, ensure_ascii=False)
+    assert canary not in rendered
+    assert cleaned["mode"] == "inspect"
+    assert parsed["mode"] == "inspect"
+    assert "<redacted>" in cleaned
+    assert cleaned["<redacted>"] == "<redacted>"
+    assert parsed["<redacted>"] == "<redacted>"
+    assert redact(cleaned) == cleaned
+    assert str(layers) in canary
+
+
+@pytest.mark.parametrize("layers", range(1, 7))
+@pytest.mark.parametrize("native_string", [True, False])
+def test_native_mapping_escaped_jwt_key_tokens_redact_output_key(
+    layers: int, native_string: bool
+) -> None:
+    canary = f"NATIVE-KEY-TOKEN-JWT-DEPTH-{layers}"
+    jwt = (
+        "ey"
+        + _compact_unicode_escape_layers("004a", layers)
+        + ("hbGciOiJIUzI1NiJ9.eyJzdWIiOiJrZXktdG9rZW4tY2FuYXJ5In0." + canary)
+    )
+    key_text = f"trace {jwt}"
+    raw_key = key_text if native_string else _StringifiedMappingKey(key_text)
+
+    cleaned = redact({raw_key: "ordinary", "mode": "inspect"})
+    rendered = safe_json_dumps({raw_key: "ordinary", "mode": "inspect"})
+
+    assert canary not in json.dumps(cleaned, ensure_ascii=False)
+    assert canary not in rendered
+    assert cleaned["mode"] == "inspect"
+    assert cleaned["<redacted>"] == "<redacted>"
+    assert redact(cleaned) == cleaned
+
+
+@pytest.mark.parametrize("unsafe_first", [True, False])
+def test_native_mapping_unsafe_key_placeholder_collision_fails_closed(
+    unsafe_first: bool,
+) -> None:
+    canary = "NATIVE-KEY-COLLISION-CANARY"
+    unsafe = rf"Authorization\u003a Custom {canary}"
+    items = (
+        [(unsafe, "ordinary"), ("<redacted>", "visible"), ("mode", "inspect")]
+        if unsafe_first
+        else [("<redacted>", "visible"), (unsafe, "ordinary"), ("mode", "inspect")]
+    )
+
+    cleaned = redact(dict(items))
+    rendered = safe_json_dumps(dict(items))
+
+    assert cleaned == {"<redacted>": "<redacted>"}
+    assert json.loads(rendered) == cleaned
+    assert canary not in rendered
+    assert redact(cleaned) == cleaned
