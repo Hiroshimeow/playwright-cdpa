@@ -19,9 +19,15 @@ def _default_coordination_dir() -> Path:
         if candidate.is_absolute():
             base = candidate
         else:
-            base = Path.home() / ".local" / "state"
+            home = Path.home()
+            if not home.is_absolute():
+                raise InvalidInputError("home directory must be absolute")
+            base = home / ".local" / "state"
     else:
-        base = Path.home() / ".local" / "state"
+        home = Path.home()
+        if not home.is_absolute():
+            raise InvalidInputError("home directory must be absolute")
+        base = home / ".local" / "state"
     return (base / "playwright-gpt-core" / "coordination").resolve()
 
 

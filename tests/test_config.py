@@ -66,6 +66,52 @@ def test_relative_xdg_state_home_uses_cwd_independent_absolute_default(
     assert first.coordination_root == first_root
 
 
+def test_relative_home_and_xdg_are_rejected_from_different_cwds(tmp_path, monkeypatch) -> None:
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    monkeypatch.setenv("HOME", "relative-home")
+    monkeypatch.setenv("XDG_STATE_HOME", "relative-xdg-state")
+
+    for repository in (repo_a, repo_b):
+        monkeypatch.chdir(repository)
+        with pytest.raises(InvalidInputError, match="home directory must be absolute"):
+            CoreConfig().validated()
+        assert not (repository / "relative-home").exists()
+        assert not (repository / "relative-xdg-state").exists()
+
+
+def test_relative_home_is_rejected_when_xdg_state_home_is_unset(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", "relative-home")
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+
+    with pytest.raises(InvalidInputError, match="home directory must be absolute"):
+        CoreConfig().validated()
+
+    assert not (tmp_path / "relative-home").exists()
+
+
+def test_absolute_xdg_state_home_does_not_require_absolute_home(tmp_path, monkeypatch) -> None:
+    state_home = tmp_path / "xdg-state"
+    monkeypatch.setenv("HOME", "relative-home")
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+
+    config = CoreConfig().validated()
+
+    assert config.coordination_root.parent.parent == state_home / "playwright-gpt-core"
+
+
+def test_unset_home_uses_absolute_os_account_home(monkeypatch) -> None:
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+
+    config = CoreConfig().validated()
+
+    assert config.coordination_root.is_absolute()
+
+
 def test_relative_explicit_coordination_directory_is_rejected() -> None:
     with pytest.raises(InvalidInputError, match="absolute path"):
         CoreConfig(coordination_dir=Path("shared-coordination")).validated()

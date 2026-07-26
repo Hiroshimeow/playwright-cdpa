@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from playwright_gpt_core.config import CoreConfig
 from playwright_gpt_core.models import TurnRecord, TurnState
 from playwright_gpt_core.service import ChatGPTCore
+
+
+def test_relative_default_home_fails_before_store_construction(tmp_path, monkeypatch) -> None:
+    from playwright_gpt_core.errors import InvalidInputError
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", "relative-home")
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+
+    with pytest.raises(InvalidInputError, match="home directory must be absolute"):
+        ChatGPTCore(CoreConfig(state_dir=Path("local-state")))
+
+    assert not (tmp_path / "local-state").exists()
+    assert not (tmp_path / "relative-home").exists()
 
 
 @pytest.mark.asyncio

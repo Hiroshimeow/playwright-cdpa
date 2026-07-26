@@ -120,6 +120,38 @@ def test_relative_coordination_directory_returns_invalid_without_creating_state(
     assert not (tmp_path / "shared-coordination").exists()
 
 
+def test_relative_default_home_returns_sanitized_invalid_without_creating_state(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    home_canary = "client_secret=HOME-CANARY"
+    xdg_canary = "proof_token=XDG-CANARY"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", home_canary)
+    monkeypatch.setenv("XDG_STATE_HOME", xdg_canary)
+
+    code = main(
+        [
+            "get",
+            "missing",
+            "--state-dir",
+            "local-state",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    value = json.loads(captured.out)
+
+    assert code == 2
+    assert value["failure"]["category"] == "invalid_input"
+    assert "home directory must be absolute" in value["failure"]["message"]
+    assert "HOME-CANARY" not in captured.out
+    assert "XDG-CANARY" not in captured.out
+    assert captured.err == ""
+    assert not (tmp_path / "local-state").exists()
+    assert not (tmp_path / home_canary).exists()
+    assert not (tmp_path / xdg_canary).exists()
+
+
 def test_unexpected_exception_diagnostic_does_not_echo_credentials() -> None:
     result = _error_result(RuntimeError("resume_conversation_token=do-not-print"))
 
