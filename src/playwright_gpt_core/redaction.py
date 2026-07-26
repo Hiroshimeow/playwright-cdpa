@@ -8,6 +8,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsp
 
 _REDACTED = "<redacted>"
 _MAX_DIAGNOSTIC = 8192
+_MAX_MAPPING_KEY = 256
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_LABEL = re.compile(r"[^a-z0-9]+")
 _KNOWN_SECRET_LABELS = {
@@ -69,10 +70,9 @@ _AUTH_SCHEME = re.compile(
     r"(?i)\b(?P<prefix>authorization\s*[:=]\s*)?"
     r"(?P<scheme>bearer|basic)\s+(?P<value>[^\s,;]+)"
 )
-_ASSIGNMENT_CANDIDATE = re.compile(
+_UNQUOTED_ASSIGNMENT_CANDIDATE = re.compile(
     r"(?i)(?=(?<![A-Za-z0-9_-])"
-    r"(?P<key>(?:(?P<quote>[\"'])(?P<quoted_label>[A-Za-z][A-Za-z0-9_.:/-]{0,80})"
-    r"(?P=quote)|(?P<label>[A-Za-z][A-Za-z0-9_-]{0,80})))"
+    r"(?P<key>(?P<label>[A-Za-z][A-Za-z0-9_-]{0,80}))"
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\"[\s\S]*$|'[\s\S]*$|[^\s,;&\"']+))"
 )
@@ -90,7 +90,13 @@ _PATH_SECRET_CONTEXTS = {
     "webhook",
 }
 _PATH_SEPARATORS = "-_.:"
-_QUALIFIED_SECRET_SUFFIXES = ("_authorization", "_cookie", "_cookies")
+_SEPARATED_HEADER_SECRET_SUFFIXES = (
+    ("proxy", "authorization"),
+    ("set", "cookie"),
+    ("authorization",),
+    ("cookies",),
+    ("cookie",),
+)
 _COMPACT_HEADER_SECRET_SUFFIXES = (
     "proxyauthorization",
     "authorization",
@@ -161,8 +167,20 @@ def _compound_compact_header_qualifier(qualifier: str) -> bool:
     return with_header[-1]
 
 
+def _separated_header_qualifier(normalized: str) -> bool:
+    components = normalized.split("_")
+    for suffix in _SEPARATED_HEADER_SECRET_SUFFIXES:
+        if tuple(components[-len(suffix) :]) != suffix:
+            continue
+        qualifier = components[: -len(suffix)]
+        return bool(qualifier) and all(
+            component in _COMPACT_HEADER_QUALIFIERS for component in qualifier
+        )
+    return False
+
+
 def _qualified_header_secret_key(normalized: str, compact: str) -> bool:
-    if any(normalized.endswith(suffix) for suffix in _QUALIFIED_SECRET_SUFFIXES):
+    if _separated_header_qualifier(normalized):
         return True
     for suffix in _COMPACT_HEADER_SECRET_SUFFIXES:
         if not compact.endswith(suffix):
@@ -312,7 +330,7 @@ def _assignment_value_end(value: str, match: re.Match[str]) -> int:
     delimiter = _UNQUOTED_ASSIGNMENT_DELIMITER.search(value, search_start)
     if delimiter is not None:
         end = delimiter.start()
-    next_assignment = _ASSIGNMENT_CANDIDATE.search(value, search_start)
+    next_assignment = _UNQUOTED_ASSIGNMENT_CANDIDATE.search(value, search_start)
     if next_assignment is not None:
         end = min(end, next_assignment.start("key"))
     while end > match.start("value") and value[end - 1].isspace():
@@ -321,13 +339,189 @@ def _assignment_value_end(value: str, match: re.Match[str]) -> int:
 
 
 def _assignment_label(match: re.Match[str]) -> str:
-    return match.group("quoted_label") or match.group("label")
+    return match.group("label")
+
+
+def _is_escaped(value: str, index: int) -> bool:
+    backslashes = 0
+    cursor = index - 1
+    while cursor >= 0 and value[cursor] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return backslashes % 2 == 1
+
+
+def _quoted_key_close(value: str, start: int) -> int | None:
+    quote_character = value[start]
+    cursor = start + 1
+    while cursor < len(value):
+        character = value[cursor]
+        if character in "\r\n":
+            return None
+        if character == quote_character and not _is_escaped(value, cursor):
+            return cursor
+        cursor += 1
+    return None
+
+
+def _decode_single_quoted_key(raw: str) -> str | None:
+    output: list[str] = []
+    cursor = 0
+    escapes = {
+        '"': '"',
+        "'": "'",
+        "/": "/",
+        "\\": "\\",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }
+    while cursor < len(raw):
+        character = raw[cursor]
+        if character != "\\":
+            output.append(character)
+            cursor += 1
+            continue
+        if cursor + 1 >= len(raw):
+            return None
+        escaped = raw[cursor + 1]
+        if escaped == "u":
+            digits = raw[cursor + 2 : cursor + 6]
+            if len(digits) != 4 or not all(
+                character in "0123456789abcdefABCDEF" for character in digits
+            ):
+                return None
+            output.append(chr(int(digits, 16)))
+            cursor += 6
+            continue
+        decoded = escapes.get(escaped)
+        if decoded is None:
+            return None
+        output.append(decoded)
+        cursor += 2
+    return "".join(output)
+
+
+def _decode_quoted_key(raw: str, quote_character: str) -> str | None:
+    try:
+        decoded = (
+            json.loads(f'"{raw}"') if quote_character == '"' else _decode_single_quoted_key(raw)
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, str):
+        return None
+    if not decoded or len(decoded) > _MAX_MAPPING_KEY:
+        return None
+    if not all(character.isprintable() for character in decoded):
+        return None
+    return decoded
+
+
+def _quoted_assignment_value(value: str, start: int) -> tuple[int, str]:
+    if start >= len(value):
+        return len(value), _REDACTED
+    quote_character = value[start]
+    if quote_character in {'"', "'"}:
+        close = _quoted_key_close(value, start)
+        if close is None:
+            return len(value), _REDACTED
+        return close + 1, f"{quote_character}{_REDACTED}{quote_character}"
+
+    end = len(value)
+    delimiter = _UNQUOTED_ASSIGNMENT_DELIMITER.search(value, start)
+    if delimiter is not None:
+        end = delimiter.start()
+    next_assignment = _UNQUOTED_ASSIGNMENT_CANDIDATE.search(value, start + 1)
+    if next_assignment is not None:
+        end = min(end, next_assignment.start("key"))
+    while end > start and value[end - 1].isspace():
+        end -= 1
+    return end, _REDACTED
+
+
+def _malformed_secret_quoted_key(raw: str) -> bool:
+    separator_positions = [
+        position for position in (raw.find(":"), raw.find("=")) if position >= 0
+    ]
+    if not separator_positions:
+        return False
+    prefix = raw[: min(separator_positions)].strip(" \t\"'")
+    return bool(prefix) and _secret_key(prefix)
+
+
+def _sanitize_quoted_assignments(value: str) -> tuple[str, bool]:
+    replacements: list[tuple[int, int, str]] = []
+    cursor = 0
+    while cursor < len(value):
+        if value[cursor] not in {'"', "'"} or _is_escaped(value, cursor):
+            cursor += 1
+            continue
+        if (
+            cursor > 0
+            and value[cursor - 1]
+            in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+        ):
+            cursor += 1
+            continue
+
+        close = _quoted_key_close(value, cursor)
+        if close is None:
+            line_end = len(value)
+            newline = re.search(r"[\r\n]", value[cursor + 1 :])
+            if newline is not None:
+                line_end = cursor + 1 + newline.start()
+            if _malformed_secret_quoted_key(value[cursor + 1 : line_end]):
+                return _REDACTED, True
+            cursor += 1
+            continue
+
+        separator_start = close + 1
+        while separator_start < len(value) and value[separator_start].isspace():
+            separator_start += 1
+        if separator_start >= len(value) or value[separator_start] not in ":=":
+            raw_key = value[cursor + 1 : close]
+            if _malformed_secret_quoted_key(raw_key):
+                return _REDACTED, True
+            cursor = close + 1
+            continue
+
+        separator_end = separator_start + 1
+        while separator_end < len(value) and value[separator_end].isspace():
+            separator_end += 1
+        raw_key = value[cursor + 1 : close]
+        decoded_key = _decode_quoted_key(raw_key, value[cursor])
+        if decoded_key is None:
+            return _REDACTED, True
+        if not _secret_key(decoded_key):
+            cursor = separator_end
+            continue
+
+        value_end, replacement_value = _quoted_assignment_value(value, separator_end)
+        replacements.append(
+            (
+                cursor,
+                value_end,
+                value[cursor:separator_end] + replacement_value,
+            )
+        )
+        cursor = max(value_end, separator_end + 1)
+
+    for start, end, replacement in reversed(replacements):
+        value = value[:start] + replacement + value[end:]
+    return value, False
 
 
 def _sanitize_assignments(value: str) -> str:
+    value, failed_closed = _sanitize_quoted_assignments(value)
+    if failed_closed:
+        return value
+
     replacements: list[tuple[int, int, str]] = []
     last_end = -1
-    for match in _ASSIGNMENT_CANDIDATE.finditer(value):
+    for match in _UNQUOTED_ASSIGNMENT_CANDIDATE.finditer(value):
         label = _assignment_label(match)
         if not _secret_key(label):
             continue
@@ -354,9 +548,21 @@ def _sanitize_assignments(value: str) -> str:
     return value
 
 
+def _line_break_after(value: str, index: int) -> int:
+    return index + 2 if value.startswith("\r\n", index) else index + 1
+
+
 def _authorization_value_end(value: str, start: int) -> int:
-    newline = re.search(r"[\r\n]", value[start:])
-    return len(value) if newline is None else start + newline.start()
+    cursor = start
+    while True:
+        newline = re.search(r"[\r\n]", value[cursor:])
+        if newline is None:
+            return len(value)
+        line_end = cursor + newline.start()
+        next_line = _line_break_after(value, line_end)
+        if next_line >= len(value) or value[next_line] not in " \t":
+            return line_end
+        cursor = next_line
 
 
 def _sanitize_authorization_headers(value: str) -> str:
@@ -412,9 +618,12 @@ def redact(value: Any, *, _depth: int = 0) -> Any:
     if isinstance(value, Mapping):
         output: dict[str, Any] = {}
         for raw_key, raw_value in value.items():
-            key = sanitize_diagnostic(raw_key, max_length=256)
+            raw_key_text = raw_key if isinstance(raw_key, str) else str(raw_key)
+            key = sanitize_diagnostic(raw_key_text, max_length=_MAX_MAPPING_KEY)
             output[key] = (
-                _REDACTED if _secret_key(key) else redact(raw_value, _depth=_depth + 1)
+                _REDACTED
+                if len(raw_key_text) > _MAX_MAPPING_KEY or _secret_key(key)
+                else redact(raw_value, _depth=_depth + 1)
             )
         return output
     if isinstance(value, (list, tuple, set, frozenset)):

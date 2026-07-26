@@ -749,3 +749,110 @@ def test_state_write_sanitizes_lowercase_compact_multi_level_header_keys(
     assert "<redacted>" in raw
     assert "inspect" in raw
     assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden", "preserved"),
+    [
+        (
+            "state-folded-authorization-crlf",
+            "Authorization: Digest nonce=STATE-FOLDED-PRIMARY\r\n"
+            " response=STATE-FOLDED-CONTINUATION\r\n"
+            "X-Status: visible",
+            ("STATE-FOLDED-PRIMARY", "STATE-FOLDED-CONTINUATION"),
+            "X-Status: visible",
+        ),
+        (
+            "state-folded-proxy-lf",
+            "Proxy-Authorization: Custom STATE-FOLDED-PROXY\n"
+            "\trealm=STATE-FOLDED-REALM\n"
+            "next diagnostic line",
+            ("STATE-FOLDED-PROXY", "STATE-FOLDED-REALM"),
+            "next diagnostic line",
+        ),
+    ],
+)
+def test_state_write_sanitizes_folded_authorization_continuations(
+    tmp_path,
+    request_id: str,
+    message: str,
+    forbidden: tuple[str, ...],
+    preserved: str,
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+
+    for secret in forbidden:
+        assert secret not in raw
+    assert preserved in raw
+    assert "<redacted>" in raw
+    assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "state-canonical-bracket-key",
+            '{"headers[Authorization]":"Digest response=STATE-BRACKET-AUTH","mode":"inspect"}',
+            ("STATE-BRACKET-AUTH",),
+        ),
+        (
+            "state-canonical-escaped-slash-key",
+            '{"headers\\/authorization":"Digest response=STATE-ESCAPED-SLASH-AUTH",'
+            '"mode":"inspect"}',
+            ("STATE-ESCAPED-SLASH-AUTH",),
+        ),
+        (
+            "state-canonical-unicode-key",
+            '{"Authoriz\\u0061tion":"Digest response=STATE-UNICODE-AUTH","mode":"inspect"}',
+            ("STATE-UNICODE-AUTH",),
+        ),
+        (
+            "state-canonical-padded-key",
+            '{" request.authorization ":"Digest response=STATE-PADDED-AUTH","mode":"inspect"}',
+            ("STATE-PADDED-AUTH",),
+        ),
+    ],
+)
+def test_state_write_sanitizes_canonical_quoted_header_keys(
+    tmp_path, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+
+    for secret in forbidden:
+        assert secret not in raw
+    assert "<redacted>" in raw
+    assert "inspect" in raw
+    assert isinstance(json.loads(raw), dict)
+
+
+def test_state_write_fails_closed_for_malformed_quoted_secret_key(tmp_path) -> None:
+    message = r'{"Authoriz\qtion":"STATE-MALFORMED-AUTH","mode":"inspect"}'
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(
+        request_id="state-malformed-quoted-key", prompt="prompt"
+    ).transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    assert "STATE-MALFORMED-AUTH" not in raw
+    assert "<redacted>" in raw
+    assert isinstance(json.loads(raw), dict)

@@ -656,3 +656,105 @@ def test_get_json_does_not_print_lowercase_compact_multi_level_header_values(
     assert "inspect" in captured.out
     assert captured.err == ""
     assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden", "preserved"),
+    [
+        (
+            "cli-folded-authorization-crlf",
+            "Authorization: Digest nonce=CLI-FOLDED-PRIMARY\r\n"
+            " response=CLI-FOLDED-CONTINUATION\r\n"
+            "X-Status: visible",
+            ("CLI-FOLDED-PRIMARY", "CLI-FOLDED-CONTINUATION"),
+            "X-Status: visible",
+        ),
+        (
+            "cli-folded-proxy-lf",
+            "Proxy-Authorization: Custom CLI-FOLDED-PROXY\n"
+            "\trealm=CLI-FOLDED-REALM\n"
+            "next diagnostic line",
+            ("CLI-FOLDED-PROXY", "CLI-FOLDED-REALM"),
+            "next diagnostic line",
+        ),
+    ],
+)
+def test_get_json_does_not_print_folded_authorization_continuations(
+    tmp_path,
+    capsys,
+    request_id: str,
+    message: str,
+    forbidden: tuple[str, ...],
+    preserved: str,
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    for secret in forbidden:
+        assert secret not in captured.out
+        assert secret not in captured.err
+    assert preserved in captured.out
+    assert "<redacted>" in captured.out
+    assert captured.err == ""
+    assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-canonical-bracket-key",
+            '{"headers[Authorization]":"Digest response=CLI-BRACKET-AUTH","mode":"inspect"}',
+            ("CLI-BRACKET-AUTH",),
+        ),
+        (
+            "cli-canonical-escaped-slash-key",
+            '{"headers\\/authorization":"Digest response=CLI-ESCAPED-SLASH-AUTH",'
+            '"mode":"inspect"}',
+            ("CLI-ESCAPED-SLASH-AUTH",),
+        ),
+        (
+            "cli-canonical-unicode-key",
+            '{"Authoriz\\u0061tion":"Digest response=CLI-UNICODE-AUTH","mode":"inspect"}',
+            ("CLI-UNICODE-AUTH",),
+        ),
+        (
+            "cli-canonical-padded-key",
+            '{" request.authorization ":"Digest response=CLI-PADDED-AUTH","mode":"inspect"}',
+            ("CLI-PADDED-AUTH",),
+        ),
+        (
+            "cli-canonical-malformed-key",
+            r'{"Authoriz\qtion":"CLI-MALFORMED-AUTH","mode":"inspect"}',
+            ("CLI-MALFORMED-AUTH",),
+        ),
+    ],
+)
+def test_get_json_does_not_print_canonical_or_malformed_quoted_header_values(
+    tmp_path, capsys, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    for secret in forbidden:
+        assert secret not in captured.out
+        assert secret not in captured.err
+    assert "<redacted>" in captured.out
+    assert captured.err == ""
+    assert json.loads(captured.out)["failure"]["category"] == "invariant"

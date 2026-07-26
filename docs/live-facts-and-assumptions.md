@@ -164,7 +164,7 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 
 ## Replacement DEV turn 11 authorization and proof-boundary facts — July 26, 2026
 
-- Explicit `Authorization` and `Proxy-Authorization` header values now redact the complete line-bounded value for Digest, AWS4, Basic, Bearer, and arbitrary schemes. A bounded semicolon-delimited diagnostic suffix is preserved only when it begins with recognized nonsecret status prose.
+- Historical turn-11 behavior redacted one physical authorization line and preserved a recognized semicolon suffix. Turn 13 removed the suffix exception, and turn 15 further supersedes the physical-line boundary by consuming folded continuation lines.
 - The shared normalized secret predicate now covers signature, vendor signed-URL signature, OAuth `code_verifier`, and `client_assertion` families across snake_case, kebab-case, camelCase, and compact forms.
 - Matching quoted assignment keys may contain `.`, `:`, and `/`; provider-qualified forms such as `"aws.secret_access_key"` are classified by the same predicate while safe sibling fields remain visible.
 - Direct diagnostics, structured mappings, URL queries, nested JSON, `Failure`, atomic state writes, and CLI JSON are covered. Full suites pass with `389 passed, 5 xfailed`; no new frontend Send was needed because the remediation is local to redaction and output boundaries.
@@ -186,3 +186,10 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - Lowercase compact multi-level header keys such as `requestheadersauthorization`, `requestheadersproxyauthorization`, and `networkrequestheaderssetcookie` now use an allowlisted component decomposition instead of requiring one exact qualifier token.
 - A compact compound prefix must be fully composed of approved request, response, network, direction, proxy, HTTP, and header components and must include `header` or `headers`. Existing one-level compact qualifiers remain supported.
 - Negative controls including `reauthorization`, `authorizationstatus`, `marketingcookie`, `setcookiedocs`, `cookiescount`, and compact prefixes containing unapproved components remain visible. The change is limited to the shared redaction classifier and its public output/state boundaries.
+
+## Replacement DEV turn 15 canonical header-boundary facts — July 26, 2026
+
+- Explicit `Authorization` and `Proxy-Authorization` provenance now consumes the first physical line plus every immediately following SP/HTAB-prefixed continuation line. CRLF+SP, LF+TAB, multiple continuations, arbitrary parameter labels, and end-of-input continuations are removed while the next non-continuation line remains visible.
+- Serialized quoted assignment keys now use an escape-aware parser with the same 256-character decoded bound and canonical normalization as real mapping keys. Bracket notation, escaped slash, Unicode escapes, padded keys, and long qualified keys converge; malformed/control-bearing/mismatched or over-bound assignment keys fail closed.
+- Separated and camel-normalized authorization/cookie qualifiers now require a complete approved context prefix rather than an unrestricted final-component suffix. Required request/response/header contexts remain protected, while ordinary fields such as `marketing_cookie`, `customer_cookies`, `legal_authorization`, and `feature_authorization` remain visible.
+- The correction is limited to the shared redaction classifier and output/state boundaries. Transport, identity, graph, monitor, state machine, ownership, locking, helper lifecycle, cancellation, backend access, and CLI architecture are unchanged.

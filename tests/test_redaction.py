@@ -1307,3 +1307,263 @@ def test_lowercase_compact_header_near_matches_remain_visible(label: str) -> Non
 
     assert value in rendered
     assert "<redacted>" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "forbidden", "expected"),
+    [
+        (
+            "Authorization: Digest nonce=FOLDED-PRIMARY\r\n"
+            " response=FOLDED-CONTINUATION\r\n"
+            "X-Status: failed",
+            ("FOLDED-PRIMARY", "FOLDED-CONTINUATION"),
+            "Authorization: <redacted>\r\nX-Status: failed",
+        ),
+        (
+            "Authorization: Custom FOLDED-LF-PRIMARY\n"
+            "\trealm=FOLDED-LF-CONTINUATION\n"
+            "next diagnostic line",
+            ("FOLDED-LF-PRIMARY", "FOLDED-LF-CONTINUATION"),
+            "Authorization: <redacted>\nnext diagnostic line",
+        ),
+        (
+            "Proxy-Authorization: Digest FOLDED-MULTI-PRIMARY\r\n"
+            " nonce=FOLDED-MULTI-NONCE\r\n"
+            "\tresponse=FOLDED-MULTI-RESPONSE\r\n"
+            "X-Trace: visible",
+            (
+                "FOLDED-MULTI-PRIMARY",
+                "FOLDED-MULTI-NONCE",
+                "FOLDED-MULTI-RESPONSE",
+            ),
+            "Proxy-Authorization: <redacted>\r\nX-Trace: visible",
+        ),
+        (
+            "authorization = Custom FOLDED-END-PRIMARY\n arbitrary=FOLDED-END-CONTINUATION",
+            ("FOLDED-END-PRIMARY", "FOLDED-END-CONTINUATION"),
+            "authorization = <redacted>",
+        ),
+    ],
+)
+def test_folded_authorization_continuations_are_part_of_the_secret_value(
+    diagnostic: str, forbidden: tuple[str, ...], expected: str
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    for secret in forbidden:
+        assert secret not in rendered
+    assert rendered == expected
+
+
+def test_folded_authorization_continuations_are_removed_from_nested_failure() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostic = (
+        "Authorization: Digest nonce=FOLDED-NESTED-PRIMARY\r\n"
+        " response=FOLDED-NESTED-RESPONSE\r\n"
+        " realm=FOLDED-NESTED-REALM\r\n"
+        "X-Status: visible"
+    )
+    outputs = (
+        safe_json_dumps({"failure": {"message": diagnostic}}),
+        json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict()),
+    )
+
+    for output in outputs:
+        for secret in (
+            "FOLDED-NESTED-PRIMARY",
+            "FOLDED-NESTED-RESPONSE",
+            "FOLDED-NESTED-REALM",
+        ):
+            assert secret not in output
+        assert "X-Status: visible" in output
+        assert "<redacted>" in output
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "decoded_key", "canary"),
+    [
+        (
+            '{"headers[Authorization]":"Digest response=QUOTED-BRACKET-AUTH","mode":"inspect"}',
+            "headers[Authorization]",
+            "QUOTED-BRACKET-AUTH",
+        ),
+        (
+            '{"headers\\/authorization":"Digest response=QUOTED-ESCAPED-SLASH",'
+            '"mode":"inspect"}',
+            "headers/authorization",
+            "QUOTED-ESCAPED-SLASH",
+        ),
+        (
+            '{"Authoriz\\u0061tion":"Digest response=QUOTED-UNICODE-AUTH","mode":"inspect"}',
+            "Authorization",
+            "QUOTED-UNICODE-AUTH",
+        ),
+        (
+            '{" request.authorization ":"Digest response=QUOTED-PADDED-AUTH","mode":"inspect"}',
+            " request.authorization ",
+            "QUOTED-PADDED-AUTH",
+        ),
+        (
+            "{'headers[Proxy-Authorization]':'Custom QUOTED-PYTHON-BRACKET','mode':'inspect'}",
+            "headers[Proxy-Authorization]",
+            "QUOTED-PYTHON-BRACKET",
+        ),
+    ],
+)
+def test_canonical_quoted_header_keys_match_real_mapping_normalization(
+    diagnostic: str, decoded_key: str, canary: str
+) -> None:
+    mapping_rendered = safe_json_dumps({decoded_key: f"Custom {canary}", "mode": "inspect"})
+    diagnostic_rendered = sanitize_diagnostic(diagnostic)
+
+    assert canary not in mapping_rendered
+    assert canary not in diagnostic_rendered
+    assert "<redacted>" in mapping_rendered
+    assert "<redacted>" in diagnostic_rendered
+    assert "inspect" in mapping_rendered
+    assert "inspect" in diagnostic_rendered
+
+
+def test_long_approved_quoted_header_key_remains_bounded_and_canonical() -> None:
+    key = ("request." * 20) + "headers.authorization"
+    assert 100 < len(key) <= 256
+    diagnostic = json.dumps(
+        {key: "Digest response=QUOTED-LONG-AUTH", "mode": "inspect"},
+        separators=(",", ":"),
+    )
+
+    rendered = sanitize_diagnostic(diagnostic)
+    parsed = json.loads(rendered)
+
+    assert "QUOTED-LONG-AUTH" not in rendered
+    assert parsed[key] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+
+
+def test_maximum_bound_quoted_header_key_is_classified() -> None:
+    base = "headers.authorization"
+    key = (" " * (256 - len(base))) + base
+    assert len(key) == 256
+    diagnostic = json.dumps(
+        {key: "Digest response=QUOTED-MAX-AUTH", "mode": "inspect"},
+        separators=(",", ":"),
+    )
+
+    rendered = sanitize_diagnostic(diagnostic)
+    parsed = json.loads(rendered)
+
+    assert "QUOTED-MAX-AUTH" not in rendered
+    assert parsed[key] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+
+
+def test_over_bound_quoted_header_key_fails_closed() -> None:
+    base = "headers.authorization"
+    key = (" " * (257 - len(base))) + base
+    assert len(key) == 257
+    diagnostic = json.dumps(
+        {key: "Digest response=QUOTED-OVERBOUND-AUTH", "mode": "inspect"},
+        separators=(",", ":"),
+    )
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert "QUOTED-OVERBOUND-AUTH" not in rendered
+
+
+def test_over_bound_real_mapping_key_fails_closed_for_its_value() -> None:
+    base = "headers.authorization"
+    key = (" " * (257 - len(base))) + base
+    rendered = safe_json_dumps(
+        {key: "Digest response=MAPPING-OVERBOUND-AUTH", "mode": "inspect"}
+    )
+
+    assert "MAPPING-OVERBOUND-AUTH" not in rendered
+    assert "<redacted>" in rendered
+    assert "inspect" in rendered
+    assert isinstance(json.loads(rendered), dict)
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "canary"),
+    [
+        (
+            r'{"Authoriz\qtion":"MALFORMED-ESCAPE-AUTH","mode":"inspect"}',
+            "MALFORMED-ESCAPE-AUTH",
+        ),
+        (
+            r'{"Authoriz\u000ation":"CONTROL-ESCAPE-AUTH","mode":"inspect"}',
+            "CONTROL-ESCAPE-AUTH",
+        ),
+        (
+            "{'Authorization\":'MISMATCHED-QUOTE-AUTH','mode':'inspect'}",
+            "MISMATCHED-QUOTE-AUTH",
+        ),
+    ],
+)
+def test_malformed_quoted_assignment_keys_fail_closed(diagnostic: str, canary: str) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert canary not in rendered
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("marketing_cookie", "PUBLIC-MARKETING-COOKIE"),
+        ("analytics_cookie", "PUBLIC-ANALYTICS-COOKIE"),
+        ("customer_cookies", "PUBLIC-CUSTOMER-COOKIES"),
+        ("legal_authorization", "PUBLIC-LEGAL-AUTHORIZATION"),
+        ("user_authorization", "PUBLIC-USER-AUTHORIZATION"),
+        ("feature_authorization", "PUBLIC-FEATURE-AUTHORIZATION"),
+        ("marketingCookie", "PUBLIC-MARKETING-CAMEL"),
+        ("legalAuthorization", "PUBLIC-LEGAL-CAMEL"),
+    ],
+)
+def test_ordinary_separated_authorization_and_cookie_fields_remain_visible(
+    label: str, value: str
+) -> None:
+    mapping_rendered = safe_json_dumps({label: value})
+    json_diagnostic = json.dumps({label: value, "mode": "inspect"}, separators=(",", ":"))
+    python_diagnostic = repr({label: value, "mode": "inspect"})
+
+    assert value in mapping_rendered
+    assert value in sanitize_diagnostic(json_diagnostic)
+    assert value in sanitize_diagnostic(python_diagnostic)
+    assert "<redacted>" not in mapping_rendered
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "headers.authorization",
+        "request.authorization",
+        "response:authorization",
+        "request.cookies",
+        "headers.proxy_authorization",
+        "response/set_cookie",
+        "request.headers.authorization",
+        "requestHeadersAuthorization",
+        "network.request.headers.set_cookie",
+    ],
+)
+def test_approved_separated_header_contexts_remain_secret(label: str) -> None:
+    canary = "APPROVED-SEPARATED-HEADER-SECRET"
+    value = (
+        f"session={canary}; Secure"
+        if "cookie" in label.casefold()
+        else f"Digest response={canary}"
+    )
+    mapping_rendered = safe_json_dumps({label: value, "mode": "inspect"})
+    diagnostic = json.dumps({label: value, "mode": "inspect"}, separators=(",", ":"))
+    diagnostic_rendered = sanitize_diagnostic(diagnostic)
+
+    assert canary not in mapping_rendered
+    assert canary not in diagnostic_rendered
+    assert "<redacted>" in mapping_rendered
+    assert "<redacted>" in diagnostic_rendered
+    assert "inspect" in mapping_rendered
+    assert "inspect" in diagnostic_rendered
