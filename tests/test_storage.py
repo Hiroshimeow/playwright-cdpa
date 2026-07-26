@@ -707,3 +707,45 @@ def test_state_write_sanitizes_cookie_and_qualified_authorization_keys(
     assert "<redacted>" in raw
     assert "inspect" in raw
     assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "state-compact-multi-level-authorization",
+            '{"requestheadersauthorization":"Digest response=STATE-COMPACT-MULTI-AUTH",'
+            '"mode":"inspect"}',
+            ("STATE-COMPACT-MULTI-AUTH",),
+        ),
+        (
+            "state-compact-multi-level-proxy-authorization",
+            "{'requestheadersproxyauthorization':'Custom "
+            "STATE-COMPACT-MULTI-PROXY-AUTH','mode':'inspect'}",
+            ("STATE-COMPACT-MULTI-PROXY-AUTH",),
+        ),
+        (
+            "state-compact-multi-level-set-cookie",
+            '{"networkrequestheaderssetcookie":"session=STATE-COMPACT-MULTI-COOKIE; '
+            'Secure","mode":"inspect"}',
+            ("STATE-COMPACT-MULTI-COOKIE",),
+        ),
+    ],
+)
+def test_state_write_sanitizes_lowercase_compact_multi_level_header_keys(
+    tmp_path, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    for secret in forbidden:
+        assert secret not in raw
+    assert "<redacted>" in raw
+    assert "inspect" in raw
+    assert isinstance(json.loads(raw), dict)

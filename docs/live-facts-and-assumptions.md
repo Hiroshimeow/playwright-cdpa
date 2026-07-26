@@ -180,3 +180,9 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - The turn 11 same-line semicolon suffix exception is superseded. Explicit `Authorization` and `Proxy-Authorization` provenance now redacts through newline or end of input; `retry`, `failed`, `failure`, `error`, `status`, `reason`, `request`, and `operation` parameters cannot terminate the secret boundary.
 - Structured mappings and matching quoted JSON/Python-style assignments now classify exact and qualified authorization, proxy-authorization, cookie, cookies, and set-cookie final components across separator, snake_case, kebab-case, camelCase, and bounded compact header forms.
 - Near matches such as `authorization_status`, documentation/schema labels, `reauthorization`, `cookie_policy`, `set_cookie_docs`, and `cookies_count` remain visible. The correction is local to redaction/output boundaries; transport, identity, graph, ownership, persistence schema, helper lifecycle, and CLI architecture are unchanged.
+
+## Replacement DEV turn 14 compact-header facts — July 26, 2026
+
+- Lowercase compact multi-level header keys such as `requestheadersauthorization`, `requestheadersproxyauthorization`, and `networkrequestheaderssetcookie` now use an allowlisted component decomposition instead of requiring one exact qualifier token.
+- A compact compound prefix must be fully composed of approved request, response, network, direction, proxy, HTTP, and header components and must include `header` or `headers`. Existing one-level compact qualifiers remain supported.
+- Negative controls including `reauthorization`, `authorizationstatus`, `marketingcookie`, `setcookiedocs`, `cookiescount`, and compact prefixes containing unapproved components remain visible. The change is limited to the shared redaction classifier and its public output/state boundaries.

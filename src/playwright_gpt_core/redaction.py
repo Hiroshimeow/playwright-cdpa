@@ -112,6 +112,8 @@ _COMPACT_HEADER_QUALIFIERS = {
     "responses",
     "upstream",
 }
+_COMPACT_HEADER_COMPONENTS = tuple(sorted(_COMPACT_HEADER_QUALIFIERS, key=len, reverse=True))
+_COMPACT_HEADER_CONTEXTS = {"header", "headers"}
 _PATH_PUBLIC_CONTEXTS = {
     "docs",
     "documentation",
@@ -135,6 +137,30 @@ def _normalize_secret_label(value: str) -> tuple[str, str]:
     return normalized, normalized.replace("_", "")
 
 
+def _compound_compact_header_qualifier(qualifier: str) -> bool:
+    without_header = [False] * (len(qualifier) + 1)
+    with_header = [False] * (len(qualifier) + 1)
+    without_header[0] = True
+
+    for index in range(len(qualifier)):
+        if not without_header[index] and not with_header[index]:
+            continue
+        for component in _COMPACT_HEADER_COMPONENTS:
+            if not qualifier.startswith(component, index):
+                continue
+            end = index + len(component)
+            is_header = component in _COMPACT_HEADER_CONTEXTS
+            if without_header[index]:
+                if is_header:
+                    with_header[end] = True
+                else:
+                    without_header[end] = True
+            if with_header[index]:
+                with_header[end] = True
+
+    return with_header[-1]
+
+
 def _qualified_header_secret_key(normalized: str, compact: str) -> bool:
     if any(normalized.endswith(suffix) for suffix in _QUALIFIED_SECRET_SUFFIXES):
         return True
@@ -142,7 +168,9 @@ def _qualified_header_secret_key(normalized: str, compact: str) -> bool:
         if not compact.endswith(suffix):
             continue
         qualifier = compact[: -len(suffix)]
-        return qualifier in _COMPACT_HEADER_QUALIFIERS
+        if qualifier in _COMPACT_HEADER_QUALIFIERS:
+            return True
+        return _compound_compact_header_qualifier(qualifier)
     return False
 
 

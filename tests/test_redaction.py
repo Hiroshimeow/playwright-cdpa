@@ -1168,3 +1168,142 @@ def test_cookie_and_qualified_authorization_values_are_removed_from_nested_failu
                 assert secret not in output
             assert "<redacted>" in output
             assert "inspect" in output
+
+
+_COMPACT_MULTI_LEVEL_PREFIXES = (
+    "requestheaders",
+    "responseheaders",
+    "httprequestheaders",
+    "httpresponseheaders",
+    "networkrequestheaders",
+    "upstreamrequestheaders",
+    "downstreamresponseheaders",
+)
+_COMPACT_HEADER_SECRET_SUFFIXES = (
+    "authorization",
+    "proxyauthorization",
+    "setcookie",
+    "cookie",
+    "cookies",
+)
+
+
+@pytest.mark.parametrize("prefix", _COMPACT_MULTI_LEVEL_PREFIXES)
+@pytest.mark.parametrize("suffix", _COMPACT_HEADER_SECRET_SUFFIXES)
+def test_lowercase_compact_multi_level_header_keys_redact_structured_values(
+    prefix: str, suffix: str
+) -> None:
+    label = prefix + suffix
+    canary = f"COMPACT-{prefix.upper()}-{suffix.upper()}"
+    value = (
+        f"Digest response={canary}"
+        if "authorization" in suffix
+        else f"session={canary}; Secure"
+    )
+
+    rendered = safe_json_dumps({label: value, "mode": "inspect"})
+    parsed = json.loads(rendered)
+
+    assert canary not in rendered
+    assert parsed[label] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "canary"),
+    [
+        (
+            "requestheadersauthorization",
+            "Digest response=COMPACT-QUOTED-AUTH",
+            "COMPACT-QUOTED-AUTH",
+        ),
+        (
+            "requestheadersproxyauthorization",
+            "Custom COMPACT-QUOTED-PROXY-AUTH",
+            "COMPACT-QUOTED-PROXY-AUTH",
+        ),
+        (
+            "requestheaderssetcookie",
+            "session=COMPACT-QUOTED-COOKIE; HttpOnly",
+            "COMPACT-QUOTED-COOKIE",
+        ),
+    ],
+)
+@pytest.mark.parametrize("style", ["json", "python"])
+def test_lowercase_compact_multi_level_header_keys_redact_quoted_assignments(
+    label: str, value: str, canary: str, style: str
+) -> None:
+    diagnostic = (
+        json.dumps({label: value, "mode": "inspect"}, separators=(",", ":"))
+        if style == "json"
+        else repr({label: value, "mode": "inspect"})
+    )
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert canary not in rendered
+    assert "<redacted>" in rendered
+    assert "inspect" in rendered
+
+
+def test_lowercase_compact_multi_level_header_values_are_removed_from_nested_failure() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostics = (
+        json.dumps(
+            {
+                "requestheadersauthorization": ("Digest response=COMPACT-NESTED-AUTH"),
+                "mode": "inspect",
+            },
+            separators=(",", ":"),
+        ),
+        repr(
+            {
+                "requestheadersproxyauthorization": ("Custom COMPACT-NESTED-PROXY-AUTH"),
+                "mode": "inspect",
+            }
+        ),
+        json.dumps(
+            {
+                "networkrequestheaderssetcookie": ("session=COMPACT-NESTED-COOKIE; Secure"),
+                "mode": "inspect",
+            },
+            separators=(",", ":"),
+        ),
+    )
+    forbidden = (
+        "COMPACT-NESTED-AUTH",
+        "COMPACT-NESTED-PROXY-AUTH",
+        "COMPACT-NESTED-COOKIE",
+    )
+
+    for diagnostic in diagnostics:
+        outputs = (
+            safe_json_dumps({"failure": {"message": diagnostic}}),
+            json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict()),
+        )
+        for output in outputs:
+            for secret in forbidden:
+                assert secret not in output
+            assert "<redacted>" in output
+            assert "inspect" in output
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "reauthorization",
+        "authorizationstatus",
+        "marketingcookie",
+        "setcookiedocs",
+        "cookiescount",
+        "marketingrequestheadersauthorization",
+        "requestheadermetadataauthorization",
+    ],
+)
+def test_lowercase_compact_header_near_matches_remain_visible(label: str) -> None:
+    value = "PUBLIC-COMPACT-HEADER-VALUE"
+    rendered = safe_json_dumps({label: value})
+
+    assert value in rendered
+    assert "<redacted>" not in rendered

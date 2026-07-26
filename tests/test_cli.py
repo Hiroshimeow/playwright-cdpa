@@ -610,3 +610,49 @@ def test_get_json_does_not_print_cookie_or_qualified_authorization_values(
     assert "inspect" in captured.out
     assert captured.err == ""
     assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-compact-multi-level-authorization",
+            '{"requestheadersauthorization":"Digest response=CLI-COMPACT-MULTI-AUTH",'
+            '"mode":"inspect"}',
+            ("CLI-COMPACT-MULTI-AUTH",),
+        ),
+        (
+            "cli-compact-multi-level-proxy-authorization",
+            "{'requestheadersproxyauthorization':'Custom "
+            "CLI-COMPACT-MULTI-PROXY-AUTH','mode':'inspect'}",
+            ("CLI-COMPACT-MULTI-PROXY-AUTH",),
+        ),
+        (
+            "cli-compact-multi-level-set-cookie",
+            '{"networkrequestheaderssetcookie":"session=CLI-COMPACT-MULTI-COOKIE; '
+            'Secure","mode":"inspect"}',
+            ("CLI-COMPACT-MULTI-COOKIE",),
+        ),
+    ],
+)
+def test_get_json_does_not_print_lowercase_compact_multi_level_header_values(
+    tmp_path, capsys, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    for secret in forbidden:
+        assert secret not in captured.out
+        assert secret not in captured.err
+    assert "<redacted>" in captured.out
+    assert "inspect" in captured.out
+    assert captured.err == ""
+    assert json.loads(captured.out)["failure"]["category"] == "invariant"
