@@ -287,3 +287,24 @@ def test_get_rejects_unknown_nested_identity_field_without_rewriting(tmp_path, c
     assert result["failure"]["category"] == "corrupt_state"
     assert path.read_text(encoding="utf-8") == raw
     assert captured.err == ""
+
+
+def test_get_json_does_not_print_multiword_passphrase_tail(tmp_path, capsys) -> None:
+    store = StateStore(tmp_path)
+    message = "qualifiedPassphrase=correct horse battery staple; retry later"
+    record = TurnRecord.new(request_id="cli-multiword-passphrase", prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", record.request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    for secret_word in ("correct", "horse", "battery", "staple"):
+        assert secret_word not in captured.out
+        assert secret_word not in captured.err
+    assert "<redacted>" in captured.out
+    assert "retry later" in captured.out
+    assert captured.err == ""

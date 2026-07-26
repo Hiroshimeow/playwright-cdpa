@@ -413,3 +413,21 @@ def test_state_write_sanitizes_cloud_and_encryption_secrets(tmp_path) -> None:
     assert "STATE-PASSPHRASE-SECRET" not in raw
     assert "<redacted>" in raw
     assert isinstance(json.loads(raw), dict)
+
+
+def test_state_write_removes_complete_multiword_passphrase(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    message = "passphrase=correct horse battery staple; retry later"
+    record = TurnRecord.new(request_id="multiword-passphrase", prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    for secret_word in ("correct", "horse", "battery", "staple"):
+        assert secret_word not in raw
+    assert "<redacted>" in raw
+    assert "retry later" in raw
+    assert isinstance(json.loads(raw), dict)

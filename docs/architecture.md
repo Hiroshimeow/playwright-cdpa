@@ -140,10 +140,11 @@ Recovery is allowed only when all of these hold:
 - a pre-Send current-node anchor exists;
 - a complete pre-Send graph baseline exists and every persisted fingerprint is an exact lowercase SHA-256 digest;
 - every baseline node remains present and its raw allowlisted projection matches the persisted digest; newly added non-baseline children are excluded from that comparison because a legitimate Send must append a child to the anchor;
-- exactly one new current-branch user node appears below that anchor;
+- exactly one post-baseline user node is an immediate child of the durable anchor across the complete mapping;
+- that same node is the only post-baseline user on the current branch; sibling, regenerated, off-current, or later current-chain user deltas remain ambiguous;
 - that node carries canonical graph correlation.
 
-No prompt-text fallback is used. A missing, reparented, content-changing, metadata-changing, or otherwise fingerprint-changing baseline fails as an ambiguous outcome before identity, state, helper lifecycle, or shared ownership is changed. Zero or multiple candidates remain `UNKNOWN` and block reuse.
+No prompt-text fallback is used. A missing, reparented, content-changing, metadata-changing, or otherwise fingerprint-changing baseline fails before identity, state, helper lifecycle, or shared ownership is changed. Structural uniqueness is evaluated across the complete mapping, not inferred from `current_node`: zero or multiple anchor children, a unique child absent from the current branch, or multiple post-baseline current-chain users remain `UNKNOWN` and block reuse.
 
 ### Fresh click with no conversation identity
 
@@ -162,7 +163,7 @@ Serialization is allowlist-first and recursively redacts:
 - Sentinel, Turnstile, and proof material;
 - JWT-like strings;
 - passwords, passphrases, secrets, API keys, canonical secret-access-key labels, and encryption keys;
-- credential-bearing URL userinfo, sensitive query parameters, fragments, and secret-bearing path segments. Secret labels are normalized across snake_case, kebab-case, camelCase, and compact forms. The shared predicate covers generic `*_token`, `*_secret`, `*_password`, `*_passwd`, `*_api_key`, `*_credential`, and `*_credentials` families plus bounded private/signing/encryption-key, secret-access-key, and passphrase forms, as well as known access/refresh/resume/session/proof/Sentinel/Turnstile labels. A credential marker joined to payload in one path segment causes the whole segment and following path context to be redacted; explicit documentation/resource suffixes and ordinary near-matches remain visible. Free-form unquoted assignment values stop at query delimiters, so sanitizing one secret query parameter does not discard later redacted or nonsecret parameters.
+- credential-bearing URL userinfo, sensitive query parameters, fragments, and secret-bearing path segments. Secret labels are normalized across snake_case, kebab-case, camelCase, and compact forms. The shared predicate covers generic `*_token`, `*_secret`, `*_password`, `*_passwd`, `*_api_key`, `*_credential`, and `*_credentials` families plus bounded private/signing/encryption-key, secret-access-key, and passphrase forms, as well as known access/refresh/resume/session/proof/Sentinel/Turnstile labels. A credential marker joined to payload in one path segment causes the whole segment and following path context to be redacted; explicit documentation/resource suffixes and ordinary near-matches remain visible. Free-form unquoted secret assignments consume until an explicit comma, semicolon, ampersand, newline, independently recognized following assignment, or end of input. Whitespace alone is part of the secret value, which prevents multi-word passphrase tails from surviving. Query parameters already sanitized by the URL boundary are not expanded into following prose. Cookie headers and multi-pair cookie blobs remain fully redacted, while one ordinary diagnostic assignment followed by semicolon-delimited context is not misclassified as a cookie header.
 
 Free-form exception and diagnostic strings pass through the same bounded sanitizer. Unexpected exceptions expose only the exception type at the public boundary. Corrupt-state diagnostics identify the record and parser exception type without preserving or chaining raw parser text.
 

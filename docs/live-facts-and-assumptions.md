@@ -133,3 +133,13 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - An adversarial local corpus confirmed secret values absent from diagnostics, structured JSON, failures, state, CLI-visible surfaces, and the evidence tree. State remained valid JSON.
 - Full suites pass on Python 3.11, 3.12, and 3.14 with `295 passed, 5 xfailed`.
 - Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes without a new Send.
+
+## Replacement DEV turn 8 sibling-ambiguity and passphrase facts — July 26, 2026
+
+- Uncertain structural recovery now enumerates immediate post-baseline user children of the durable anchor across the complete mapping. It requires exactly one total anchor child and requires that same node to be the only post-baseline user on the current branch.
+- Public `watch` and `recover` regressions cover two sibling anchor children and multiple post-baseline users on one current chain. Ambiguous cases remain `UNKNOWN`, keep `RETRY_PROHIBITED`, bind no identity, preserve helper state, and retain the same shared owner revision. A public single-unique-user control completes and releases ownership.
+- Unquoted secret assignment values no longer stop at whitespace. Multi-word passphrases are redacted through comma, semicolon, ampersand, newline, a following assignment boundary, or end of input; quoted values retain their quoted boundary.
+- URL query values already reduced to redaction markers remain bounded, so safe prose after a sanitized URL is preserved. Cookie headers and multi-pair cookie blobs remain fully redacted, while semicolon-delimited nonsecret diagnostic context after one passphrase remains visible.
+- An adversarial harness confirmed sibling recovery failed closed and retained ownership. A generated multi-word passphrase canary was absent from diagnostics, nested JSON, `Failure`, durable state, CLI stdout/stderr, and the evidence tree; state and CLI output remained valid JSON and safe context survived.
+- Full suites pass on Python 3.11, 3.12, and 3.14 with `312 passed, 5 xfailed`.
+- Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes without a new Send.

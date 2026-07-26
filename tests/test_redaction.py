@@ -392,3 +392,57 @@ def test_cloud_and_encryption_query_failure_and_nested_diagnostics_are_sanitized
     assert "PASS-SECRET-VALUE" not in failure
     for output in (rendered, failure):
         assert "<redacted>" in output
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "preserved"),
+    [
+        ("passphrase=correct horse battery staple", None),
+        ("passphrase: correct horse battery staple; retry later", "retry later"),
+        ("qualifiedPassphrase=correct horse battery staple, mode inspect", "mode inspect"),
+        ("ssh_passphrase=correct horse battery staple\nnext line", "next line"),
+        ("passphrase=correct horse battery staple&mode=inspect", "mode=inspect"),
+        ("passphrase=correct horse battery staple mode=inspect", "mode=inspect"),
+        ('passphrase="correct horse battery staple"; retry later', "retry later"),
+    ],
+)
+def test_multiword_passphrases_redact_to_safe_boundary(
+    diagnostic: str, preserved: str | None
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    for secret_word in ("correct", "horse", "battery", "staple"):
+        assert secret_word not in rendered
+    assert "<redacted>" in rendered
+    if preserved is not None:
+        assert preserved in rendered
+
+
+def test_multiword_passphrase_is_removed_from_nested_diagnostic_and_failure() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostic = "qualifiedPassphrase=correct horse battery staple; retry later"
+    nested = safe_json_dumps({"failure": {"message": diagnostic}})
+    failure = json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict())
+
+    for output in (nested, failure):
+        for secret_word in ("correct", "horse", "battery", "staple"):
+            assert secret_word not in output
+        assert "<redacted>" in output
+        assert "retry later" in output
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "Cookie: arbitrary_name=COOKIE-SECRET-VALUE",
+        "alpha=COOKIE-ONE; beta=COOKIE-TWO",
+    ],
+)
+def test_cookie_headers_and_multi_pair_cookie_blobs_remain_fully_redacted(
+    diagnostic: str,
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert "COOKIE" not in rendered

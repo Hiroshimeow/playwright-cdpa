@@ -257,3 +257,211 @@ async def test_uncertain_recovery_rejects_baseline_without_anchor_fingerprint(tm
     assert persisted.identity is not None
     assert persisted.identity.user_message_id is None
     assert persisted.state == TurnState.UNKNOWN
+
+
+class _PublicSnapshotBackend:
+    snapshot_graph = None
+
+    def __init__(self, _context) -> None:
+        pass
+
+    async def snapshot(self, _conversation_id: str):
+        from playwright_gpt_core.monitor import MonitorSnapshot
+
+        return MonitorSnapshot("COMPLETE", type(self).snapshot_graph)
+
+
+def _uncertain_public_record(core: ChatGPTCore, baseline: dict) -> TurnRecord:
+    record = TurnRecord.new(
+        request_id="public-uncertain-request",
+        prompt="not persisted",
+        target_kind="conversation",
+        target_conversation_id="conversation-1",
+    ).transition(TurnState.PREPARING)
+    record = record.with_identity(
+        TurnIdentity(
+            conversation_id="conversation-1",
+            pre_send_current_node="old-final",
+        )
+    ).with_baseline(graph_fingerprints(baseline))
+    record = record.with_send_provenance(SendProvenance.CLICK_BOUNDARY_ENTERED)
+    return core.store.create(record.transition(TurnState.UNKNOWN))
+
+
+def _baseline_graph() -> dict:
+    return graph(
+        message("root", "system", None, turn=None, request=None),
+        message(
+            "old-final",
+            "assistant",
+            "root",
+            text="old",
+            turn="old-turn",
+            request="old-request",
+        ),
+        current="old-final",
+    )
+
+
+def _ambiguous_post_baseline_graph(kind: str) -> dict:
+    nodes = [
+        message("root", "system", None, turn=None, request=None),
+        message(
+            "old-final",
+            "assistant",
+            "root",
+            text="old",
+            turn="old-turn",
+            request="old-request",
+        ),
+        message(
+            "first-user",
+            "user",
+            "old-final",
+            text="first",
+            turn="first-turn",
+            request="first-request",
+        ),
+        message(
+            "first-final",
+            "assistant",
+            "first-user",
+            text="FIRST_RESULT",
+            turn="first-turn",
+            request="first-request",
+        ),
+    ]
+    if kind == "sibling":
+        second_parent = "old-final"
+    elif kind == "current-chain":
+        second_parent = "first-final"
+    else:
+        raise AssertionError(kind)
+    nodes.extend(
+        [
+            message(
+                "second-user",
+                "user",
+                second_parent,
+                text="second",
+                turn="second-turn",
+                request="second-request",
+            ),
+            message(
+                "second-final",
+                "assistant",
+                "second-user",
+                text="SECOND_RESULT",
+                turn="second-turn",
+                request="second-request",
+            ),
+        ]
+    )
+    return graph(*nodes, current="second-final")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["watch", "recover"])
+@pytest.mark.parametrize("kind", ["sibling", "current-chain"])
+async def test_public_uncertain_recovery_rejects_multiple_post_baseline_users(
+    tmp_path, monkeypatch, operation: str, kind: str
+) -> None:
+    import playwright_gpt_core.service as service_module
+
+    snapshot = _ambiguous_post_baseline_graph(kind)
+    _PublicSnapshotBackend.snapshot_graph = snapshot
+    monkeypatch.setattr(service_module, "BrowserSession", _BrowserSession)
+    monkeypatch.setattr(service_module, "AuthenticatedBackend", _PublicSnapshotBackend)
+
+    core = ChatGPTCore(
+        CoreConfig(
+            state_dir=tmp_path / "state",
+            coordination_dir=tmp_path / "coordination",
+            deployment_id="uncertain-multiple-test",
+            timeout=0.05,
+            poll=0.001,
+            stable_seconds=0,
+        )
+    )
+    record = _uncertain_public_record(core, _baseline_graph())
+    claim = core.coordination.claim("conversation-1", record.request_id)
+
+    result = await getattr(core, operation)(record.request_id)
+
+    persisted = core.store.load(record.request_id)
+    current_claim = core.coordination.load("conversation-1")
+    assert result.state == TurnState.UNKNOWN
+    assert result.response is None
+    assert result.failure is not None
+    assert result.failure.category.value == "graph_ambiguous"
+    assert persisted.state == TurnState.UNKNOWN
+    assert persisted.send_provenance == SendProvenance.RETRY_PROHIBITED
+    assert persisted.identity is not None
+    assert persisted.identity.user_message_id is None
+    assert persisted.identity.turn_exchange_id is None
+    assert persisted.helper_page_closed_at is None
+    assert current_claim.active_request_id == record.request_id
+    assert current_claim.revision == claim.revision
+
+
+@pytest.mark.asyncio
+async def test_public_uncertain_recovery_accepts_one_unique_post_baseline_user(
+    tmp_path, monkeypatch
+) -> None:
+    import playwright_gpt_core.service as service_module
+
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message(
+            "old-final",
+            "assistant",
+            "root",
+            text="old",
+            turn="old-turn",
+            request="old-request",
+        ),
+        message(
+            "only-user",
+            "user",
+            "old-final",
+            text="only",
+            turn="only-turn",
+            request="only-request",
+        ),
+        message(
+            "only-final",
+            "assistant",
+            "only-user",
+            text="ONLY_RESULT",
+            turn="only-turn",
+            request="only-request",
+        ),
+        current="only-final",
+    )
+    _PublicSnapshotBackend.snapshot_graph = snapshot
+    monkeypatch.setattr(service_module, "BrowserSession", _BrowserSession)
+    monkeypatch.setattr(service_module, "AuthenticatedBackend", _PublicSnapshotBackend)
+
+    core = ChatGPTCore(
+        CoreConfig(
+            state_dir=tmp_path / "state",
+            coordination_dir=tmp_path / "coordination",
+            deployment_id="uncertain-unique-test",
+            timeout=0.05,
+            poll=0.001,
+            stable_seconds=0,
+        )
+    )
+    record = _uncertain_public_record(core, _baseline_graph())
+    core.coordination.claim("conversation-1", record.request_id)
+
+    result = await core.watch(record.request_id)
+
+    persisted = core.store.load(record.request_id)
+    assert result.success is True
+    assert result.state == TurnState.COMPLETE
+    assert result.response == "ONLY_RESULT"
+    assert persisted.identity is not None
+    assert persisted.identity.user_message_id == "only-user"
+    assert persisted.identity.turn_exchange_id == "only-turn"
+    assert core.coordination.load("conversation-1").active_request_id is None

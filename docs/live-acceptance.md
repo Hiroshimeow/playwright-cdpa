@@ -798,3 +798,109 @@ Python 3.14.0:  295 passed, 5 xfailed
 ```
 
 The five xfails remain immutable prototype characterization tests. Existing hard-cancellation and external-schema limitations are unchanged.
+
+## Replacement DEV turn 8 — sibling ambiguity and multi-word passphrases
+
+Date: 2026-07-26
+
+### Complete-mapping structural uniqueness
+
+An uncertain existing-conversation click has no persisted prompt body and may have no transport correlation. `current_node` alone is therefore not proof of which later user node came from the click.
+
+Recovery now requires both:
+
+```text
+exactly one post-baseline user child of the durable anchor across the complete mapping
+that same node is the only post-baseline user on the current branch
+```
+
+Public `watch` and `recover` regressions cover:
+
+```text
+two sibling user children below the anchor
+one current and one off-current sibling
+multiple post-baseline users on the current chain
+one unique user control
+```
+
+Ambiguous results preserve:
+
+```text
+state: UNKNOWN
+send provenance: RETRY_PROHIBITED
+response: absent
+user/turn identity: unbound
+helper lifecycle: unchanged
+shared owner: exact request
+shared owner revision: unchanged
+```
+
+The unique control reaches exact `COMPLETE`, returns only its own final response, and releases ownership.
+
+### Multi-word passphrase boundary
+
+Unquoted values classified by the shared secret predicate now consume through the first safe boundary:
+
+```text
+comma
+semicolon
+ampersand
+newline
+following assignment boundary
+end of input
+```
+
+Whitespace alone is not a boundary. Quoted values stop at their closing quote. URL query values that are already `<redacted>` remain terminal and do not consume following prose.
+
+Coverage includes:
+
+```text
+passphrase=multi word value
+passphrase: multi word value
+qualifiedPassphrase=multi word value
+quoted passphrase
+semicolon/comma/newline context
+ampersand query context
+following assignment context
+nested diagnostics
+Failure serialization
+durable state
+CLI JSON stdout/stderr
+cookie-header and multi-cookie preservation gates
+```
+
+### Independent adversarial evidence
+
+```text
+sibling watch fail-closed: true
+sibling identity unbound: true
+sibling owner unchanged: true
+multi-word passphrase removed: true
+safe context preserved: true
+state valid JSON: true
+CLI exit 20 and stderr empty: true
+evidence-tree secret scan: pass
+```
+
+### Exact persisted rewatch
+
+```text
+CDP /json/version HTTP: 200
+request: 3c2de378…2dd0
+exit: 0
+state: COMPLETE
+response: DEV3_OK
+stderr: 0 bytes
+```
+
+No new frontend Send was issued.
+
+### Automated evidence
+
+```text
+Python 3.11.15: 312 passed, 5 xfailed
+Python 3.12.13: 312 passed, 5 xfailed
+Python 3.14.0:  312 passed, 5 xfailed
+```
+
+The five xfails remain immutable prototype characterization tests. Existing hard-cancellation and external-schema limitations are unchanged.

@@ -62,7 +62,9 @@ _ASSIGNMENT_CANDIDATE = re.compile(
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;&]+))"
 )
-_COOKIE_VALUE = re.compile(r"(?i)(?:^|;\s*)(?:__secure-|__host-)?[A-Za-z0-9_.-]+=\S+")
+_COOKIE_VALUE = re.compile(r"(?i)(?:^|;\s*)(?:__secure-|__host-)?[A-Za-z0-9_.-]+=[^;\s]+")
+_COOKIE_HEADER = re.compile(r"(?i)^\s*cookie\s*:")
+_UNQUOTED_ASSIGNMENT_DELIMITER = re.compile(r"[,;&\r\n]")
 _URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _PATH_SECRET_CONTEXTS = {
     "reset",
@@ -216,6 +218,26 @@ def _sanitize_url(raw_url: str) -> str:
         return f"<redacted-url>{trailing}"
 
 
+def _assignment_value_end(value: str, match: re.Match[str]) -> int:
+    matched_value = match.group("value")
+    if matched_value and all(part == _REDACTED for part in matched_value.split("#")):
+        return match.end("value")
+    if matched_value.startswith(('"', "'")):
+        return match.end("value")
+
+    search_start = match.end("value")
+    end = len(value)
+    delimiter = _UNQUOTED_ASSIGNMENT_DELIMITER.search(value, search_start)
+    if delimiter is not None:
+        end = delimiter.start()
+    next_assignment = _ASSIGNMENT_CANDIDATE.search(value, search_start)
+    if next_assignment is not None:
+        end = min(end, next_assignment.start("label"))
+    while end > match.start("value") and value[end - 1].isspace():
+        end -= 1
+    return end
+
+
 def _sanitize_assignments(value: str) -> str:
     replacements: list[tuple[int, int, str]] = []
     last_end = -1
@@ -224,7 +246,7 @@ def _sanitize_assignments(value: str) -> str:
         if not _secret_key(label):
             continue
         start = match.start("label")
-        end = match.end("value")
+        end = _assignment_value_end(value, match)
         if start < last_end:
             continue
         replacements.append(
@@ -256,9 +278,8 @@ def sanitize_diagnostic(value: Any, *, max_length: int = _MAX_DIAGNOSTIC) -> str
     text = text[: max(max_length * 4, max_length)]
     text = _URL.sub(lambda match: _sanitize_url(match.group(0)), text)
     text = _sanitize_plain_text(text)
-    if _COOKIE_VALUE.search(text) and (
-        ";" in text or text.casefold().lstrip().startswith("cookie")
-    ):
+    cookie_matches = list(_COOKIE_VALUE.finditer(text))
+    if _COOKIE_HEADER.match(text) or len(cookie_matches) >= 2:
         text = _REDACTED
     if len(text) > max_length:
         text = text[:max_length] + f"...<truncated:{len(text) - max_length}>"
