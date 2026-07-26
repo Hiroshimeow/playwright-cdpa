@@ -377,8 +377,8 @@ Temporary evidence root: `/tmp/pgc-dev2-20260726`
 Two clients were constructed under different working directories with the same HOME and `XDG_STATE_HOME=relative-xdg-state`:
 
 ```text
-first_root  /tmp/pgc-dev2-20260726/home/.local/state/playwright-gpt-core/coordination/cdp-ccd7d89fb667491ad03e7662
-second_root /tmp/pgc-dev2-20260726/home/.local/state/playwright-gpt-core/coordination/cdp-ccd7d89fb667491ad03e7662
+first_root  /tmp/pgc-dev2-20260726/home/.local/state/playwright-gpt-core/coordination/cdp-ccd7d89f…7662
+second_root /tmp/pgc-dev2-20260726/home/.local/state/playwright-gpt-core/coordination/cdp-ccd7d89f…7662
 same_absolute True
 second claim: ownership conflict
 ```
@@ -386,7 +386,7 @@ second claim: ownership conflict
 ### Existing-record live compatibility
 
 ```text
-request: ce6fbaad8e2b4319b438df9df89cf0c1
+request: ce6fbaad…f0c1
 command: watch with the original explicit shared coordination namespace
 exit: 0
 state: COMPLETE
@@ -397,7 +397,7 @@ stderr: 0 bytes
 ### Fresh real-frontend Send
 
 ```text
-request: 2a2630e2ad6e4ca8a7dcf85b9c7f5680
+request: 2a2630e2…5680
 exit: 0
 state: COMPLETE
 response: DEV2_OK
@@ -434,7 +434,7 @@ Temporary evidence root: `/tmp/pgc-dev3-20260726`
 
 ```text
 CDP HTTP: 200
-request: 2a2630e2ad6e4ca8a7dcf85b9c7f5680
+request: 2a2630e2…5680
 exit: 0
 state: COMPLETE
 response: DEV2_OK
@@ -446,7 +446,7 @@ runtime source: target repository src/playwright_gpt_core
 
 ```text
 prompt: Reply with exactly DEV3_OK
-request: 3c2de378cd2043fb8c7a5ac6dd952dd0
+request: 3c2de378…2dd0
 exit: 0
 state: COMPLETE
 response: DEV3_OK
@@ -530,7 +530,7 @@ A focused regression found that the free-form assignment scanner could consume t
 
 ```text
 CDP /json/version HTTP: 200
-request: 3c2de378cd2043fb8c7a5ac6dd952dd0
+request: 3c2de378…2dd0
 exit: 0
 state: COMPLETE
 response: DEV3_OK
@@ -565,3 +565,71 @@ uv run pytest -ra
 ```
 
 The five xfails remain immutable prototype characterization tests. Existing cancellation and external-schema limitations are unchanged.
+
+## Replacement DEV turn 5 — publication identifier minimization
+
+Date: 2026-07-26
+
+### Documentation contract correction
+
+The committed report previously contained five full durable request identifiers and two occurrences of one full coordination namespace digest. They are now represented consistently as truncated prefix/suffix forms, for example:
+
+```text
+request: 3c2de378…2dd0
+coordination namespace: cdp-ccd7d89f…7662
+```
+
+No product runtime or persisted state was changed.
+
+### Regression gate
+
+`tests/test_documentation.py` scans the public Markdown surfaces:
+
+```text
+README.md
+reference/README.md
+docs/**/*.md
+```
+
+It rejects:
+
+- full UUID-shaped values;
+- contiguous hexadecimal identifiers from 24 through 64 characters.
+
+The sole full-length exception is an exact checksum already declared in `reference/SHA256SUMS`, which preserves the immutable prototype-integrity proof without allowing runtime identifiers by context or label heuristics.
+
+Initial result before remediation:
+
+```text
+7 findings
+- 5 durable request identifiers
+- 2 coordination digest occurrences
+```
+
+Final result:
+
+```text
+0 findings
+1 documentation test passed
+```
+
+### Exact persisted rewatch
+
+```text
+CDP /json/version HTTP: 200
+request: 3c2de378…2dd0
+exit: 0
+state: COMPLETE
+response: DEV3_OK
+stderr: 0 bytes
+```
+
+### Automated evidence
+
+```text
+Python 3.11.15: 245 passed, 5 xfailed
+Python 3.12.13: 245 passed, 5 xfailed
+Python 3.14.0:  245 passed, 5 xfailed
+```
+
+The five xfails remain immutable prototype characterization tests. Existing runtime limitations are unchanged.

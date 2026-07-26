@@ -105,3 +105,11 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - Current full-suite result is `244 passed, 5 xfailed`. The five xfails remain immutable prototype characterizations.
 - Existing exact request `3c2de378…2dd0` rewatched on CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes after this change.
 - A local adversarial corpus proved credential, private-key, and signing-key values absent from diagnostics, structured JSON, nested diagnostics, `Failure`, state files, CLI stdout, and the entire evidence tree. State remained valid JSON; CLI returned the expected invariant exit 20 with zero stderr bytes.
+
+## Replacement DEV turn 5 publication-minimization facts — July 26, 2026
+
+- Five full 32-hex durable request identifiers and one full coordination namespace digest were removed from the committed live-acceptance report and replaced with consistent truncated forms.
+- A new documentation regression scans root/docs/reference public Markdown for UUIDs and contiguous 24–64 character hexadecimal identifiers. The only full-length exception is an exact checksum already declared in `reference/SHA256SUMS`.
+- The documentation gate initially reproduced seven findings and now passes with zero findings.
+- Full suites pass on Python 3.11, 3.12, and 3.14 with `245 passed, 5 xfailed`.
+- Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes after the documentation-only change.
