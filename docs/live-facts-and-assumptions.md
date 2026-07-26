@@ -152,3 +152,12 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - Generated quoted JSON, Python-style, cloud-secret, and `Set-Cookie` canaries were absent from direct diagnostics, nested JSON, `Failure`, durable state, CLI stdout/stderr, and the evidence tree. Safe nonsecret sibling fields remained visible and state/CLI output remained valid JSON.
 - Full suites pass on Python 3.11, 3.12, and 3.14 with `325 passed, 5 xfailed`.
 - Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes without a new Send.
+
+## Replacement DEV turn 10 escape-aware value and cookie-token facts — July 26, 2026
+
+- Quoted secret values now use an escape-aware grammar for both quote styles. A backslash plus following character is consumed as content, so escaped quotes do not terminate the value; the true closing quote remains the redaction boundary.
+- Regression coverage generates valid JSON with zero through four literal backslashes before an embedded quote, plus a Python-style single-quoted value containing escaped single quotes. Unterminated single- and double-quoted secrets, including a trailing backslash, fail closed through the diagnostic remainder. Complete secret tails are removed and bounded nonsecret sibling fields remain intact for valid quoted values.
+- Explicit `Cookie:` and `Set-Cookie:` recognition now uses the HTTP token alphabet for cookie names. Names containing `+`, `$`, `!`, `^`, `|`, and `~`, all accepted by `http.cookies.SimpleCookie` in the test environment, are fully redacted. Raw multi-pair cookie detection uses the same token alphabet.
+- Generated escaped-quote and token-punctuation cookie canaries were absent from direct diagnostics, nested JSON, `Failure`, durable state, CLI stdout/stderr, and the evidence tree. State and CLI output remained valid JSON.
+- Full suites pass on Python 3.11, 3.12, and 3.14 with `347 passed, 5 xfailed`.
+- Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes without a new Send.

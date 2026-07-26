@@ -60,10 +60,11 @@ _ASSIGNMENT_CANDIDATE = re.compile(
     r"(?i)(?=(?<![A-Za-z0-9_-])"
     r"(?P<key>(?P<quote>[\"']?)(?P<label>[A-Za-z][A-Za-z0-9_-]{0,80})(?P=quote))"
     r"(?P<separator>\s*[:=]\s*)"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;&]+))"
+    r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\"[\s\S]*$|'[\s\S]*$|[^\s,;&\"']+))"
 )
-_COOKIE_VALUE = re.compile(r"(?i)(?:^|;\s*)(?:__secure-|__host-)?[A-Za-z0-9_.-]+=[^;\s]+")
-_COOKIE_HEADER = re.compile(r"(?i)\b(?:set-cookie|cookie)\s*:\s*(?=[A-Za-z0-9_.-]+=)")
+_HTTP_TOKEN = r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+"
+_COOKIE_VALUE = re.compile(rf"(?i)(?:^|;\s*){_HTTP_TOKEN}=[^;\s]+")
+_COOKIE_HEADER = re.compile(rf"(?i)\b(?:set-cookie|cookie)\s*:\s*(?={_HTTP_TOKEN}=)")
 _UNQUOTED_ASSIGNMENT_DELIMITER = re.compile(r"[,;&\r\n]")
 _URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _PATH_SECRET_CONTEXTS = {

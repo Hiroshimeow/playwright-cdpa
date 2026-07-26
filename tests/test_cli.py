@@ -347,3 +347,48 @@ def test_get_json_does_not_print_quoted_keys_or_explicit_cookie_headers(
     assert "<redacted>" in captured.out
     assert captured.err == ""
     assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-escaped-quoted-secret",
+            json.dumps(
+                {"passphrase": 'CLI "ESCAPED" SECRET TAIL', "mode": "inspect"},
+                separators=(",", ":"),
+            ),
+            ("CLI", "ESCAPED", "SECRET", "TAIL"),
+        ),
+        (
+            "cli-token-cookie-name-secret",
+            "Set-Cookie: prefix+suffix=CLI-COOKIE-PUNCT-SECRET; HttpOnly",
+            ("CLI-COOKIE-PUNCT-SECRET",),
+        ),
+        (
+            "cli-unterminated-quoted-secret",
+            'passphrase="CLI-UNTERMINATED-SECRET-TAIL',
+            ("CLI-UNTERMINATED-SECRET-TAIL",),
+        ),
+    ],
+)
+def test_get_json_does_not_print_escaped_values_or_token_cookie_names(
+    tmp_path, capsys, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", record.request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    for secret in forbidden:
+        assert secret not in captured.out
+        assert secret not in captured.err
+    assert "<redacted>" in captured.out
+    assert captured.err == ""
+    assert json.loads(captured.out)["failure"]["category"] == "invariant"

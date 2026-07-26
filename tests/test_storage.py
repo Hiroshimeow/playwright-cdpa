@@ -464,3 +464,44 @@ def test_state_write_sanitizes_quoted_keys_and_explicit_cookie_headers(
         assert secret not in raw
     assert "<redacted>" in raw
     assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "escaped-quoted-secret",
+            json.dumps(
+                {"passphrase": 'STATE "ESCAPED" SECRET TAIL', "mode": "inspect"},
+                separators=(",", ":"),
+            ),
+            ("STATE", "ESCAPED", "SECRET", "TAIL"),
+        ),
+        (
+            "token-cookie-name-secret",
+            "Set-Cookie: prefix+suffix=STATE-COOKIE-PUNCT-SECRET; HttpOnly",
+            ("STATE-COOKIE-PUNCT-SECRET",),
+        ),
+        (
+            "unterminated-quoted-secret",
+            'passphrase="STATE-UNTERMINATED-SECRET-TAIL',
+            ("STATE-UNTERMINATED-SECRET-TAIL",),
+        ),
+    ],
+)
+def test_state_write_sanitizes_escaped_values_and_token_cookie_names(
+    tmp_path, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    for secret in forbidden:
+        assert secret not in raw
+    assert "<redacted>" in raw
+    assert isinstance(json.loads(raw), dict)

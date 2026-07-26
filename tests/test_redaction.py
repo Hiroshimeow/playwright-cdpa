@@ -519,3 +519,82 @@ def test_quoted_keys_and_set_cookie_are_removed_from_nested_diagnostic_and_failu
             assert "NESTED" not in output
             assert "SECRET" not in output
             assert "<redacted>" in output
+
+
+@pytest.mark.parametrize("backslash_count", [0, 1, 2, 3, 4])
+def test_json_quoted_secret_values_are_escape_aware(backslash_count: int) -> None:
+    secret_value = "alpha " + ("\\" * backslash_count) + '"quoted" omega tail'
+    diagnostic = json.dumps(
+        {"passphrase": secret_value, "mode": "inspect"},
+        separators=(",", ":"),
+    )
+    assert json.loads(diagnostic)["passphrase"] == secret_value
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert "alpha" not in rendered
+    assert "quoted" not in rendered
+    assert "omega" not in rendered
+    assert "tail" not in rendered
+    assert json.loads(rendered) == {"passphrase": "<redacted>", "mode": "inspect"}
+
+
+def test_python_style_single_quoted_secret_value_is_escape_aware() -> None:
+    diagnostic = r"{'passphrase': 'alpha \'quoted\' omega tail', 'mode': 'inspect'}"
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    for secret in ("alpha", "quoted", "omega", "tail"):
+        assert secret not in rendered
+    assert rendered == "{'passphrase': '<redacted>', 'mode': 'inspect'}"
+
+
+@pytest.mark.parametrize("punctuation", ["+", "$", "!", "^", "|", "~"])
+def test_explicit_cookie_headers_accept_http_token_punctuation(punctuation: str) -> None:
+    from http.cookies import SimpleCookie
+
+    cookie_name = f"prefix{punctuation}suffix"
+    diagnostic = f"Set-Cookie: {cookie_name}=TOKEN-PUNCTUATION-SECRET; HttpOnly"
+    parsed = SimpleCookie()
+    parsed.load(f"{cookie_name}=value")
+    assert cookie_name in parsed
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert "TOKEN-PUNCTUATION-SECRET" not in rendered
+
+
+def test_escaped_quotes_and_token_cookie_names_are_removed_from_nested_failure() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostics = [
+        json.dumps(
+            {"passphrase": 'NESTED "ESCAPED" SECRET TAIL', "mode": "inspect"},
+            separators=(",", ":"),
+        ),
+        "Set-Cookie: prefix+suffix=NESTED-COOKIE-PUNCT-SECRET; HttpOnly",
+    ]
+    for diagnostic in diagnostics:
+        nested = safe_json_dumps({"failure": {"message": diagnostic}})
+        failure = json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict())
+        for output in (nested, failure):
+            for secret in ("NESTED", "ESCAPED", "SECRET", "TAIL", "COOKIE", "PUNCT"):
+                assert secret not in output
+            assert "<redacted>" in output
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        'passphrase="UNTERMINATED SECRET TAIL',
+        "passphrase='UNTERMINATED SECRET TAIL",
+        'passphrase="UNTERMINATED SECRET TAIL\\',
+    ],
+)
+def test_unterminated_quoted_secret_values_fail_closed(diagnostic: str) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "passphrase=<redacted>"
+    for secret in ("UNTERMINATED", "SECRET", "TAIL"):
+        assert secret not in rendered
