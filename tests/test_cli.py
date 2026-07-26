@@ -392,3 +392,56 @@ def test_get_json_does_not_print_escaped_values_or_token_cookie_names(
     assert "<redacted>" in captured.out
     assert captured.err == ""
     assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-authorization-header-secret",
+            (
+                "Authorization: AWS4-HMAC-SHA256 Credential=CLI-AUTH-CREDENTIAL, "
+                "SignedHeaders=host, Signature=CLI-AUTH-SIGNATURE"
+            ),
+            ("CLI-AUTH-CREDENTIAL", "CLI-AUTH-SIGNATURE"),
+        ),
+        (
+            "cli-proxy-authorization-secret",
+            "Proxy-Authorization: Digest response=CLI-PROXY-AUTH-RESPONSE",
+            ("CLI-PROXY-AUTH-RESPONSE",),
+        ),
+        (
+            "cli-proof-shapes-secret",
+            (
+                "GET https://example.test/object?X-Goog-Signature=CLI-SIGNED-URL&"
+                "codeVerifier=CLI-CODE-VERIFIER&clientAssertion=CLI-ASSERTION"
+            ),
+            ("CLI-SIGNED-URL", "CLI-CODE-VERIFIER", "CLI-ASSERTION"),
+        ),
+        (
+            "cli-dotted-quoted-key-secret",
+            '{"aws.secret_access_key":"CLI-DOTTED-CREDENTIAL","mode":"inspect"}',
+            ("CLI-DOTTED-CREDENTIAL",),
+        ),
+    ],
+)
+def test_get_json_does_not_print_authorization_proof_or_separator_key_values(
+    tmp_path, capsys, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", record.request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    for secret in forbidden:
+        assert secret not in captured.out
+        assert secret not in captured.err
+    assert "<redacted>" in captured.out
+    assert captured.err == ""
+    assert json.loads(captured.out)["failure"]["category"] == "invariant"

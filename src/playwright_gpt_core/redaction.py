@@ -17,6 +17,10 @@ _KNOWN_SECRET_LABELS = {
     "cookie",
     "cookies",
     "credential",
+    "client_assertion",
+    "clientassertion",
+    "code_verifier",
+    "codeverifier",
     "encryption_key",
     "encryptionkey",
     "credentials",
@@ -40,6 +44,7 @@ _KNOWN_SECRET_LABELS = {
     "resumeconversationtoken",
     "session_token",
     "sessiontoken",
+    "signature",
     "signing_key",
     "signingkey",
     "proof",
@@ -52,13 +57,21 @@ _KNOWN_SECRET_LABELS = {
     "token",
 }
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\b")
+_AUTHORIZATION_HEADER = re.compile(
+    r"(?i)\b(?P<label>proxy-authorization|authorization)"
+    r"(?P<separator>\s*[:=]\s*)"
+)
+_AUTHORIZATION_SAFE_SUFFIX = re.compile(
+    r"(?i);(?=\s+(?:retry|failed|failure|error|status|reason|request|operation)\b)"
+)
 _AUTH_SCHEME = re.compile(
     r"(?i)\b(?P<prefix>authorization\s*[:=]\s*)?"
     r"(?P<scheme>bearer|basic)\s+(?P<value>[^\s,;]+)"
 )
 _ASSIGNMENT_CANDIDATE = re.compile(
     r"(?i)(?=(?<![A-Za-z0-9_-])"
-    r"(?P<key>(?P<quote>[\"']?)(?P<label>[A-Za-z][A-Za-z0-9_-]{0,80})(?P=quote))"
+    r"(?P<key>(?:(?P<quote>[\"'])(?P<quoted_label>[A-Za-z][A-Za-z0-9_.:/-]{0,80})"
+    r"(?P=quote)|(?P<label>[A-Za-z][A-Za-z0-9_-]{0,80})))"
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\"[\s\S]*$|'[\s\S]*$|[^\s,;&\"']+))"
 )
@@ -118,10 +131,13 @@ def _secret_key(key: str) -> bool:
             "_credentials",
             "_private_key",
             "_signing_key",
+            "_signature",
+            "_code_verifier",
+            "_client_assertion",
         )
     ):
         return True
-    if compact.endswith(
+    return compact.endswith(
         (
             "secret",
             "secretaccesskey",
@@ -134,10 +150,11 @@ def _secret_key(key: str) -> bool:
             "credentials",
             "privatekey",
             "signingkey",
+            "signature",
+            "codeverifier",
+            "clientassertion",
         )
-    ):
-        return True
-    return False
+    )
 
 
 def _path_secret_marker(segment: str) -> bool:
@@ -151,9 +168,9 @@ def _path_secret_marker_with_payload(segment: str) -> bool:
         if index == 0:
             continue
         previous = segment[index - 1]
-        if character in _PATH_SEPARATORS:
-            boundaries.add(index)
-        elif character.isupper() and (previous.islower() or previous.isdigit()):
+        if character in _PATH_SEPARATORS or (
+            character.isupper() and (previous.islower() or previous.isdigit())
+        ):
             boundaries.add(index)
 
     for index in sorted(boundaries, reverse=True):
@@ -239,11 +256,15 @@ def _assignment_value_end(value: str, match: re.Match[str]) -> int:
     return end
 
 
+def _assignment_label(match: re.Match[str]) -> str:
+    return match.group("quoted_label") or match.group("label")
+
+
 def _sanitize_assignments(value: str) -> str:
     replacements: list[tuple[int, int, str]] = []
     last_end = -1
     for match in _ASSIGNMENT_CANDIDATE.finditer(value):
-        label = match.group("label")
+        label = _assignment_label(match)
         if not _secret_key(label):
             continue
         start = match.start("key")
@@ -269,7 +290,34 @@ def _sanitize_assignments(value: str) -> str:
     return value
 
 
+def _authorization_value_end(value: str, start: int) -> int:
+    line_end = len(value)
+    newline = re.search(r"[\r\n]", value[start:])
+    if newline is not None:
+        line_end = start + newline.start()
+    safe_suffix = _AUTHORIZATION_SAFE_SUFFIX.search(value, start, line_end)
+    return safe_suffix.start() if safe_suffix is not None else line_end
+
+
+def _sanitize_authorization_headers(value: str) -> str:
+    replacements: list[tuple[int, int, str]] = []
+    for match in _AUTHORIZATION_HEADER.finditer(value):
+        start = match.start("label")
+        end = _authorization_value_end(value, match.end())
+        replacements.append(
+            (
+                start,
+                end,
+                f"{match.group('label')}{match.group('separator')}{_REDACTED}",
+            )
+        )
+    for start, end, replacement in reversed(replacements):
+        value = value[:start] + replacement + value[end:]
+    return value
+
+
 def _sanitize_plain_text(value: str) -> str:
+    value = _sanitize_authorization_headers(value)
     value = _AUTH_SCHEME.sub(
         lambda match: f"{match.group('prefix') or ''}{match.group('scheme')} {_REDACTED}",
         value,

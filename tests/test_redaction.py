@@ -598,3 +598,183 @@ def test_unterminated_quoted_secret_values_fail_closed(diagnostic: str) -> None:
     assert rendered == "passphrase=<redacted>"
     for secret in ("UNTERMINATED", "SECRET", "TAIL"):
         assert secret not in rendered
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "forbidden"),
+    [
+        (
+            (
+                "operation failed Authorization: Digest username=alice, realm=chat, "
+                "nonce=AUTH-DIGEST-NONCE, response=AUTH-DIGEST-RESPONSE, "
+                "opaque=AUTH-DIGEST-OPAQUE\nretry later"
+            ),
+            ("AUTH-DIGEST-NONCE", "AUTH-DIGEST-RESPONSE", "AUTH-DIGEST-OPAQUE"),
+        ),
+        (
+            (
+                "Authorization = AWS4-HMAC-SHA256 Credential=AUTH-AWS-CREDENTIAL, "
+                "SignedHeaders=host;x-amz-date, Signature=AUTH-AWS-SIGNATURE\nretry later"
+            ),
+            ("AUTH-AWS-CREDENTIAL", "AUTH-AWS-SIGNATURE"),
+        ),
+        (
+            (
+                "Proxy-Authorization: Digest username=proxy, "
+                "response=PROXY-DIGEST-RESPONSE\nretry later"
+            ),
+            ("PROXY-DIGEST-RESPONSE",),
+        ),
+        (
+            "authorization: CustomScheme ARBITRARY-AUTHORIZATION-VALUE\nretry later",
+            ("ARBITRARY-AUTHORIZATION-VALUE",),
+        ),
+        (
+            "Proxy-Authorization=Basic PROXY-BASIC-VALUE\nretry later",
+            ("PROXY-BASIC-VALUE",),
+        ),
+    ],
+)
+def test_explicit_authorization_headers_redact_complete_value_for_any_scheme(
+    diagnostic: str, forbidden: tuple[str, ...]
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    for secret in forbidden:
+        assert secret not in rendered
+    assert "<redacted>" in rendered
+    assert "retry later" in rendered
+
+
+@pytest.mark.parametrize(
+    ("label", "secret"),
+    [
+        ("signature", "SIGNATURE-VALUE"),
+        ("request_signature", "REQUEST-SIGNATURE-VALUE"),
+        ("requestSignature", "REQUEST-SIGNATURE-VALUE"),
+        ("requestsignature", "REQUEST-SIGNATURE-VALUE"),
+        ("X-Amz-Signature", "AMZ-SIGNATURE-VALUE"),
+        ("X_Goog_Signature", "GOOG-SIGNATURE-VALUE"),
+        ("code_verifier", "CODE-VERIFIER-VALUE"),
+        ("code-verifier", "CODE-VERIFIER-VALUE"),
+        ("codeVerifier", "CODE-VERIFIER-VALUE"),
+        ("codeverifier", "CODE-VERIFIER-VALUE"),
+        ("client_assertion", "CLIENT-ASSERTION-VALUE"),
+        ("client-assertion", "CLIENT-ASSERTION-VALUE"),
+        ("clientAssertion", "CLIENT-ASSERTION-VALUE"),
+        ("clientassertion", "CLIENT-ASSERTION-VALUE"),
+    ],
+)
+def test_signature_verifier_and_assertion_assignments_use_shared_secret_grammar(
+    label: str, secret: str
+) -> None:
+    rendered = sanitize_diagnostic(f"operation failed: {label}={secret}; retry later")
+
+    assert secret not in rendered
+    assert "<redacted>" in rendered
+    assert "retry later" in rendered
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "signature",
+        "X-Amz-Signature",
+        "XGoogSignature",
+        "code_verifier",
+        "codeVerifier",
+        "client_assertion",
+        "clientAssertion",
+    ],
+)
+def test_signature_verifier_and_assertion_structured_values_are_sanitized(label: str) -> None:
+    rendered = safe_json_dumps({"outer": {label: "STRUCTURED-PROOF-VALUE"}})
+
+    assert "STRUCTURED-PROOF-VALUE" not in rendered
+    assert "<redacted>" in rendered
+
+
+def test_signed_url_signature_and_oauth_proof_query_values_are_sanitized() -> None:
+    rendered = sanitize_diagnostic(
+        "GET https://example.test/object?"
+        "X-Amz-Signature=SIGNED-URL-SIGNATURE&"
+        "X-Amz-Credential=SIGNED-URL-CREDENTIAL&"
+        "code_verifier=QUERY-CODE-VERIFIER&"
+        "clientAssertion=QUERY-CLIENT-ASSERTION&mode=inspect failed"
+    )
+
+    for secret in (
+        "SIGNED-URL-SIGNATURE",
+        "SIGNED-URL-CREDENTIAL",
+        "QUERY-CODE-VERIFIER",
+        "QUERY-CLIENT-ASSERTION",
+    ):
+        assert secret not in rendered
+    assert "mode=inspect" in rendered
+    assert rendered.count("<redacted>") >= 4
+
+
+@pytest.mark.parametrize(
+    "segment",
+    ["signature-guide", "code-verifier-docs", "client-assertion-schema"],
+)
+def test_proof_label_documentation_paths_remain_visible(segment: str) -> None:
+    rendered = sanitize_diagnostic(f"GET https://example.test/api/{segment} failed")
+
+    assert segment in rendered
+    assert "<redacted>" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "secret", "preserved"),
+    [
+        (
+            '{"aws.secret_access_key":"DOTTED-CREDENTIAL-VALUE","mode":"inspect"}',
+            "DOTTED-CREDENTIAL-VALUE",
+            '"mode":"inspect"',
+        ),
+        (
+            "{'aws:secret_access_key':'COLON-CREDENTIAL-VALUE','mode':'inspect'}",
+            "COLON-CREDENTIAL-VALUE",
+            "'mode':'inspect'",
+        ),
+        (
+            '{"aws/secret_access_key":"SLASH-CREDENTIAL-VALUE","mode":"inspect"}',
+            "SLASH-CREDENTIAL-VALUE",
+            '"mode":"inspect"',
+        ),
+    ],
+)
+def test_quoted_separator_bearing_secret_keys_are_sanitized(
+    diagnostic: str, secret: str, preserved: str
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert secret not in rendered
+    assert "<redacted>" in rendered
+    assert preserved in rendered
+
+
+def test_new_authorization_and_proof_shapes_are_removed_from_nested_failure() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostics = [
+        "Authorization: Digest nonce=NESTED-AUTH-NONCE, response=NESTED-AUTH-RESPONSE",
+        "GET https://example.test/object?X-Goog-Signature=NESTED-SIGNED-URL",
+        "code_verifier=NESTED-CODE-VERIFIER; client_assertion=NESTED-ASSERTION",
+        '{"aws.secret_access_key":"NESTED-DOTTED-CREDENTIAL","mode":"inspect"}',
+    ]
+    for diagnostic in diagnostics:
+        nested = safe_json_dumps({"failure": {"message": diagnostic}})
+        failure = json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict())
+        for output in (nested, failure):
+            for secret in (
+                "NESTED-AUTH-NONCE",
+                "NESTED-AUTH-RESPONSE",
+                "NESTED-SIGNED-URL",
+                "NESTED-CODE-VERIFIER",
+                "NESTED-ASSERTION",
+                "NESTED-DOTTED-CREDENTIAL",
+            ):
+                assert secret not in output
+            assert "<redacted>" in output

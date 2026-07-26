@@ -505,3 +505,49 @@ def test_state_write_sanitizes_escaped_values_and_token_cookie_names(
         assert secret not in raw
     assert "<redacted>" in raw
     assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "authorization-header-secret",
+            "Authorization: Digest nonce=STATE-AUTH-NONCE, response=STATE-AUTH-RESPONSE",
+            ("STATE-AUTH-NONCE", "STATE-AUTH-RESPONSE"),
+        ),
+        (
+            "proxy-authorization-secret",
+            "Proxy-Authorization: Custom STATE-PROXY-AUTHORIZATION",
+            ("STATE-PROXY-AUTHORIZATION",),
+        ),
+        (
+            "proof-signature-secret",
+            (
+                "GET https://example.test/object?X-Amz-Signature=STATE-SIGNED-URL&"
+                "code_verifier=STATE-CODE-VERIFIER&client_assertion=STATE-ASSERTION"
+            ),
+            ("STATE-SIGNED-URL", "STATE-CODE-VERIFIER", "STATE-ASSERTION"),
+        ),
+        (
+            "dotted-quoted-key-secret",
+            '{"aws.secret_access_key":"STATE-DOTTED-CREDENTIAL","mode":"inspect"}',
+            ("STATE-DOTTED-CREDENTIAL",),
+        ),
+    ],
+)
+def test_state_write_sanitizes_authorization_proof_and_separator_key_shapes(
+    tmp_path, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    for secret in forbidden:
+        assert secret not in raw
+    assert "<redacted>" in raw
+    assert isinstance(json.loads(raw), dict)

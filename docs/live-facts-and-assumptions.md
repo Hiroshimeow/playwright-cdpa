@@ -161,3 +161,10 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - Generated escaped-quote and token-punctuation cookie canaries were absent from direct diagnostics, nested JSON, `Failure`, durable state, CLI stdout/stderr, and the evidence tree. State and CLI output remained valid JSON.
 - Full suites pass on Python 3.11, 3.12, and 3.14 with `347 passed, 5 xfailed`.
 - Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes without a new Send.
+
+## Replacement DEV turn 11 authorization and proof-boundary facts — July 26, 2026
+
+- Explicit `Authorization` and `Proxy-Authorization` header values now redact the complete line-bounded value for Digest, AWS4, Basic, Bearer, and arbitrary schemes. A bounded semicolon-delimited diagnostic suffix is preserved only when it begins with recognized nonsecret status prose.
+- The shared normalized secret predicate now covers signature, vendor signed-URL signature, OAuth `code_verifier`, and `client_assertion` families across snake_case, kebab-case, camelCase, and compact forms.
+- Matching quoted assignment keys may contain `.`, `:`, and `/`; provider-qualified forms such as `"aws.secret_access_key"` are classified by the same predicate while safe sibling fields remain visible.
+- Direct diagnostics, structured mappings, URL queries, nested JSON, `Failure`, atomic state writes, and CLI JSON are covered. Full suites pass with `389 passed, 5 xfailed`; no new frontend Send was needed because the remediation is local to redaction and output boundaries.
