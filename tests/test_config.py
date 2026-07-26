@@ -66,7 +66,12 @@ def test_relative_xdg_state_home_uses_cwd_independent_absolute_default(
     assert first.coordination_root == first_root
 
 
-def test_relative_explicit_coordination_directory_is_frozen_after_validation(
+def test_relative_explicit_coordination_directory_is_rejected() -> None:
+    with pytest.raises(InvalidInputError, match="absolute path"):
+        CoreConfig(coordination_dir=Path("shared-coordination")).validated()
+
+
+def test_same_relative_coordination_argument_is_rejected_from_different_cwds(
     tmp_path, monkeypatch
 ) -> None:
     repo_a = tmp_path / "repo-a"
@@ -74,10 +79,11 @@ def test_relative_explicit_coordination_directory_is_frozen_after_validation(
     repo_a.mkdir()
     repo_b.mkdir()
 
-    monkeypatch.chdir(repo_a)
-    config = CoreConfig(coordination_dir=Path("shared-coordination")).validated()
-    root = config.coordination_root
-
-    monkeypatch.chdir(repo_b)
-    assert root.is_absolute()
-    assert config.coordination_root == root
+    for repository in (repo_a, repo_b):
+        monkeypatch.chdir(repository)
+        with pytest.raises(InvalidInputError, match="absolute path"):
+            CoreConfig(
+                coordination_dir=Path("shared-coordination"),
+                deployment_id="same-browser",
+            ).validated()
+        assert not (repository / "shared-coordination").exists()

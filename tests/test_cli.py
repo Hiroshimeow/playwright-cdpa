@@ -91,6 +91,35 @@ def test_missing_get_returns_invalid_exit_and_json_failure(tmp_path, capsys) -> 
     assert value["failure"]["category"] == "invalid_input"
 
 
+def test_relative_coordination_directory_returns_invalid_without_creating_state(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    code = main(
+        [
+            "get",
+            "missing",
+            "--state-dir",
+            "local-state",
+            "--coordination-dir",
+            "shared-coordination",
+            "--deployment-id",
+            "same-browser",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    value = json.loads(captured.out)
+
+    assert code == 2
+    assert value["failure"]["category"] == "invalid_input"
+    assert "absolute path" in value["failure"]["message"]
+    assert captured.err == ""
+    assert not (tmp_path / "local-state").exists()
+    assert not (tmp_path / "shared-coordination").exists()
+
+
 def test_unexpected_exception_diagnostic_does_not_echo_credentials() -> None:
     result = _error_result(RuntimeError("resume_conversation_token=do-not-print"))
 

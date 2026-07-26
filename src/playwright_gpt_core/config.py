@@ -28,7 +28,10 @@ def _default_coordination_dir() -> Path:
 def _absolute_coordination_dir(value: Path | None) -> Path:
     if value is None:
         return _default_coordination_dir()
-    return Path(value).expanduser().resolve()
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        raise InvalidInputError("coordination_dir must be an absolute path")
+    return candidate.resolve()
 
 
 @dataclass(frozen=True, slots=True)
