@@ -52,6 +52,8 @@ _KNOWN_SECRET_LABELS = {
     "prooftoken",
     "proof_material",
     "proofmaterial",
+    "proxy_authorization",
+    "proxyauthorization",
     "sentinel",
     "turnstile",
     "token",

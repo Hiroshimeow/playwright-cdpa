@@ -551,3 +551,59 @@ def test_state_write_sanitizes_authorization_proof_and_separator_key_shapes(
         assert secret not in raw
     assert "<redacted>" in raw
     assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "structured-proxy-authorization-digest",
+            json.dumps(
+                {
+                    "Proxy-Authorization": (
+                        "Digest nonce=STATE-PROXY-NONCE, response=STATE-PROXY-RESPONSE"
+                    ),
+                    "mode": "inspect",
+                },
+                separators=(",", ":"),
+            ),
+            ("STATE-PROXY-NONCE", "STATE-PROXY-RESPONSE"),
+        ),
+        (
+            "quoted-proxy-authorization-aws",
+            (
+                "{'proxy_authorization':'AWS4-HMAC-SHA256 "
+                "Credential=STATE-PROXY-CREDENTIAL, "
+                "Signature=STATE-PROXY-SIGNATURE','mode':'inspect'}"
+            ),
+            ("STATE-PROXY-CREDENTIAL", "STATE-PROXY-SIGNATURE"),
+        ),
+        (
+            "quoted-proxy-authorization-custom",
+            '{"proxyAuthorization":"CustomScheme STATE-PROXY-ARBITRARY","mode":"inspect"}',
+            ("STATE-PROXY-ARBITRARY",),
+        ),
+        (
+            "quoted-proxy-authorization-compact",
+            "{'proxyauthorization':'Digest response=STATE-PROXY-COMPACT','mode':'inspect'}",
+            ("STATE-PROXY-COMPACT",),
+        ),
+    ],
+)
+def test_state_write_sanitizes_structured_and_quoted_proxy_authorization_values(
+    tmp_path, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    for secret in forbidden:
+        assert secret not in raw
+    assert "<redacted>" in raw
+    assert "inspect" in raw
+    assert isinstance(json.loads(raw), dict)

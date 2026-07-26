@@ -168,3 +168,9 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - The shared normalized secret predicate now covers signature, vendor signed-URL signature, OAuth `code_verifier`, and `client_assertion` families across snake_case, kebab-case, camelCase, and compact forms.
 - Matching quoted assignment keys may contain `.`, `:`, and `/`; provider-qualified forms such as `"aws.secret_access_key"` are classified by the same predicate while safe sibling fields remain visible.
 - Direct diagnostics, structured mappings, URL queries, nested JSON, `Failure`, atomic state writes, and CLI JSON are covered. Full suites pass with `389 passed, 5 xfailed`; no new frontend Send was needed because the remediation is local to redaction and output boundaries.
+
+## Replacement DEV turn 12 structured proxy-authorization facts — July 26, 2026
+
+- Structured mappings and matching quoted JSON/Python-style assignments now classify `Proxy-Authorization`, `proxy_authorization`, camelCase, and compact key forms as the same whole-value secret identity.
+- Digest nonce/response, AWS4 Credential/Signature, Basic, and arbitrary proxy authorization schemes are removed before `Failure`, durable state, or CLI JSON output; bounded nonsecret sibling fields remain visible and JSON remains valid.
+- The correction is limited to the shared secret-label predicate and cross-surface regressions. Transport, identity, graph, ownership, persistence schema, helper lifecycle, and CLI architecture are unchanged.

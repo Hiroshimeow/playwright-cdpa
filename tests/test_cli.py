@@ -445,3 +445,63 @@ def test_get_json_does_not_print_authorization_proof_or_separator_key_values(
     assert "<redacted>" in captured.out
     assert captured.err == ""
     assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-structured-proxy-authorization-digest",
+            json.dumps(
+                {
+                    "Proxy-Authorization": (
+                        "Digest nonce=CLI-PROXY-NONCE, response=CLI-PROXY-RESPONSE"
+                    ),
+                    "mode": "inspect",
+                },
+                separators=(",", ":"),
+            ),
+            ("CLI-PROXY-NONCE", "CLI-PROXY-RESPONSE"),
+        ),
+        (
+            "cli-quoted-proxy-authorization-aws",
+            (
+                "{'proxy_authorization':'AWS4-HMAC-SHA256 "
+                "Credential=CLI-PROXY-CREDENTIAL, "
+                "Signature=CLI-PROXY-SIGNATURE','mode':'inspect'}"
+            ),
+            ("CLI-PROXY-CREDENTIAL", "CLI-PROXY-SIGNATURE"),
+        ),
+        (
+            "cli-quoted-proxy-authorization-custom",
+            '{"proxyAuthorization":"CustomScheme CLI-PROXY-ARBITRARY","mode":"inspect"}',
+            ("CLI-PROXY-ARBITRARY",),
+        ),
+        (
+            "cli-quoted-proxy-authorization-compact",
+            "{'proxyauthorization':'Digest response=CLI-PROXY-COMPACT','mode':'inspect'}",
+            ("CLI-PROXY-COMPACT",),
+        ),
+    ],
+)
+def test_get_json_does_not_print_structured_or_quoted_proxy_authorization_values(
+    tmp_path, capsys, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", record.request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    for secret in forbidden:
+        assert secret not in captured.out
+        assert secret not in captured.err
+    assert "<redacted>" in captured.out
+    assert "inspect" in captured.out
+    assert captured.err == ""
+    assert json.loads(captured.out)["failure"]["category"] == "invariant"

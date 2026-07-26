@@ -778,3 +778,128 @@ def test_new_authorization_and_proof_shapes_are_removed_from_nested_failure() ->
             ):
                 assert secret not in output
             assert "<redacted>" in output
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "forbidden"),
+    [
+        (
+            "Proxy-Authorization",
+            "Digest nonce=STRUCTURED-PROXY-NONCE, response=STRUCTURED-PROXY-RESPONSE",
+            ("STRUCTURED-PROXY-NONCE", "STRUCTURED-PROXY-RESPONSE"),
+        ),
+        (
+            "proxy_authorization",
+            (
+                "AWS4-HMAC-SHA256 Credential=STRUCTURED-PROXY-CREDENTIAL, "
+                "SignedHeaders=host, Signature=STRUCTURED-PROXY-SIGNATURE"
+            ),
+            ("STRUCTURED-PROXY-CREDENTIAL", "STRUCTURED-PROXY-SIGNATURE"),
+        ),
+        (
+            "proxyAuthorization",
+            "CustomScheme STRUCTURED-PROXY-ARBITRARY",
+            ("STRUCTURED-PROXY-ARBITRARY",),
+        ),
+        (
+            "proxyauthorization",
+            "Basic STRUCTURED-PROXY-BASIC",
+            ("STRUCTURED-PROXY-BASIC",),
+        ),
+    ],
+)
+def test_proxy_authorization_structured_mapping_values_use_shared_secret_grammar(
+    label: str, value: str, forbidden: tuple[str, ...]
+) -> None:
+    rendered = safe_json_dumps({"headers": {label: value}, "mode": "inspect"})
+    parsed = json.loads(rendered)
+
+    for secret in forbidden:
+        assert secret not in rendered
+    assert parsed["headers"][label] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "forbidden", "preserved"),
+    [
+        (
+            json.dumps(
+                {
+                    "Proxy-Authorization": (
+                        "Digest nonce=QUOTED-PROXY-NONCE, response=QUOTED-PROXY-RESPONSE"
+                    ),
+                    "mode": "inspect",
+                },
+                separators=(",", ":"),
+            ),
+            ("QUOTED-PROXY-NONCE", "QUOTED-PROXY-RESPONSE"),
+            '"mode":"inspect"',
+        ),
+        (
+            (
+                "{'proxy_authorization':'AWS4-HMAC-SHA256 "
+                "Credential=QUOTED-PROXY-CREDENTIAL, "
+                "Signature=QUOTED-PROXY-SIGNATURE','mode':'inspect'}"
+            ),
+            ("QUOTED-PROXY-CREDENTIAL", "QUOTED-PROXY-SIGNATURE"),
+            "'mode':'inspect'",
+        ),
+        (
+            '{"proxyAuthorization":"CustomScheme QUOTED-PROXY-ARBITRARY","mode":"inspect"}',
+            ("QUOTED-PROXY-ARBITRARY",),
+            '"mode":"inspect"',
+        ),
+        (
+            "{'proxyauthorization':'Digest response=QUOTED-PROXY-COMPACT','mode':'inspect'}",
+            ("QUOTED-PROXY-COMPACT",),
+            "'mode':'inspect'",
+        ),
+    ],
+)
+def test_quoted_proxy_authorization_assignments_redact_every_scheme(
+    diagnostic: str, forbidden: tuple[str, ...], preserved: str
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    for secret in forbidden:
+        assert secret not in rendered
+    assert "<redacted>" in rendered
+    assert preserved in rendered
+
+
+def test_proxy_authorization_values_are_removed_from_nested_and_failure_surfaces() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostics = [
+        json.dumps(
+            {
+                "Proxy-Authorization": (
+                    "Digest nonce=NESTED-PROXY-NONCE, response=NESTED-PROXY-RESPONSE"
+                ),
+                "mode": "inspect",
+            },
+            separators=(",", ":"),
+        ),
+        (
+            "{'proxyAuthorization':'AWS4-HMAC-SHA256 "
+            "Credential=NESTED-PROXY-CREDENTIAL, "
+            "Signature=NESTED-PROXY-SIGNATURE','mode':'inspect'}"
+        ),
+    ]
+    forbidden = (
+        "NESTED-PROXY-NONCE",
+        "NESTED-PROXY-RESPONSE",
+        "NESTED-PROXY-CREDENTIAL",
+        "NESTED-PROXY-SIGNATURE",
+    )
+
+    for diagnostic in diagnostics:
+        outputs = (
+            safe_json_dumps({"failure": {"message": diagnostic}}),
+            json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict()),
+        )
+        for output in outputs:
+            for secret in forbidden:
+                assert secret not in output
+            assert "<redacted>" in output
