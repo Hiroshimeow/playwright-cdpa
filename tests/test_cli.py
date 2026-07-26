@@ -930,3 +930,120 @@ def test_get_json_does_not_print_escaped_diagnostic_value_secrets(
     assert forbidden not in captured.err
     assert "<redacted>" in parsed["failure"]["message"]
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-recursive-inner-auth",
+            json.dumps(
+                {
+                    "message": json.dumps(
+                        {
+                            "message": r"Authorization\u003a Custom CLI-RECURSIVE-AUTH",
+                            "mode": "inner",
+                        },
+                        separators=(",", ":"),
+                    ),
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "CLI-RECURSIVE-AUTH",
+        ),
+        (
+            "cli-recursive-inner-proxy",
+            json.dumps(
+                {
+                    "message": json.dumps(
+                        {
+                            "message": (
+                                r"Proxy-Authoriz\u0061tion\u003a Digest "
+                                r"CLI-RECURSIVE-PROXY"
+                            ),
+                            "mode": "inner",
+                        },
+                        separators=(",", ":"),
+                    ),
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "CLI-RECURSIVE-PROXY",
+        ),
+        (
+            "cli-recursive-inner-cookie",
+            json.dumps(
+                {
+                    "message": json.dumps(
+                        {
+                            "message": (
+                                r"Set-Cook\u0069e\u003a "
+                                r"session=CLI-RECURSIVE-COOKIE; Secure"
+                            ),
+                            "mode": "inner",
+                        },
+                        separators=(",", ":"),
+                    ),
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "CLI-RECURSIVE-COOKIE",
+        ),
+        (
+            "cli-double-escaped-auth",
+            json.dumps(
+                {
+                    "message": r"Authorization\u003a Custom CLI-DOUBLE-AUTH",
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "CLI-DOUBLE-AUTH",
+        ),
+        (
+            "cli-double-escaped-proxy",
+            json.dumps(
+                {
+                    "message": r"Proxy-Authorization\u003a Digest CLI-DOUBLE-PROXY",
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "CLI-DOUBLE-PROXY",
+        ),
+        (
+            "cli-double-escaped-cookie",
+            json.dumps(
+                {
+                    "message": (r"Set-Cookie\u003a session=CLI-DOUBLE-COOKIE; Secure"),
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "CLI-DOUBLE-COOKIE",
+        ),
+    ],
+)
+def test_get_json_does_not_print_recursive_structured_diagnostic_secrets(
+    tmp_path, capsys, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+
+    assert code == 20
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert "<redacted>" in parsed["failure"]["message"]
+    assert "outer" in parsed["failure"]["message"]
+    assert captured.err == ""

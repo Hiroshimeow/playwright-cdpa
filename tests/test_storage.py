@@ -1015,3 +1015,116 @@ def test_state_write_sanitizes_escaped_diagnostic_value_boundaries(
         parsed["failure"]["message"] == "<redacted>"
         or "inspect" in parsed["failure"]["message"]
     )
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "state-recursive-inner-auth",
+            json.dumps(
+                {
+                    "message": json.dumps(
+                        {
+                            "message": r"Authorization\u003a Custom STATE-RECURSIVE-AUTH",
+                            "mode": "inner",
+                        },
+                        separators=(",", ":"),
+                    ),
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "STATE-RECURSIVE-AUTH",
+        ),
+        (
+            "state-recursive-inner-proxy",
+            json.dumps(
+                {
+                    "message": json.dumps(
+                        {
+                            "message": (
+                                r"Proxy-Authoriz\u0061tion\u003a Digest "
+                                r"STATE-RECURSIVE-PROXY"
+                            ),
+                            "mode": "inner",
+                        },
+                        separators=(",", ":"),
+                    ),
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "STATE-RECURSIVE-PROXY",
+        ),
+        (
+            "state-recursive-inner-cookie",
+            json.dumps(
+                {
+                    "message": json.dumps(
+                        {
+                            "message": (
+                                r"Set-Cook\u0069e\u003a "
+                                r"session=STATE-RECURSIVE-COOKIE; Secure"
+                            ),
+                            "mode": "inner",
+                        },
+                        separators=(",", ":"),
+                    ),
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "STATE-RECURSIVE-COOKIE",
+        ),
+        (
+            "state-double-escaped-auth",
+            json.dumps(
+                {
+                    "message": r"Authorization\u003a Custom STATE-DOUBLE-AUTH",
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "STATE-DOUBLE-AUTH",
+        ),
+        (
+            "state-double-escaped-proxy",
+            json.dumps(
+                {
+                    "message": (r"Proxy-Authorization\u003a Digest STATE-DOUBLE-PROXY"),
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "STATE-DOUBLE-PROXY",
+        ),
+        (
+            "state-double-escaped-cookie",
+            json.dumps(
+                {
+                    "message": (r"Set-Cookie\u003a session=STATE-DOUBLE-COOKIE; Secure"),
+                    "mode": "outer",
+                },
+                separators=(",", ":"),
+            ),
+            "STATE-DOUBLE-COOKIE",
+        ),
+    ],
+)
+def test_state_write_sanitizes_recursive_structured_diagnostic_values(
+    tmp_path, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+
+    assert forbidden not in raw
+    assert "<redacted>" in parsed["failure"]["message"]
+    assert "outer" in parsed["failure"]["message"]

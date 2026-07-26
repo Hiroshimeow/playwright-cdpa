@@ -10,6 +10,7 @@ _REDACTED = "<redacted>"
 _MAX_DIAGNOSTIC = 8192
 _MAX_MAPPING_KEY = 256
 _MAX_QUOTED_KEY_RAW = _MAX_MAPPING_KEY * 6
+_MAX_STRUCTURED_DIAGNOSTIC_DEPTH = 12
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_LABEL = re.compile(r"[^a-z0-9]+")
 _KNOWN_SECRET_LABELS = {
@@ -636,7 +637,242 @@ def _sanitize_unstructured_diagnostic(text: str, *, max_length: int) -> str:
     return text
 
 
-def _sanitize_json_string_values(text: str, *, max_length: int) -> str | None:
+def _skip_json_whitespace(text: str, cursor: int) -> int:
+    while cursor < len(text) and text[cursor] in " \t\r\n":
+        cursor += 1
+    return cursor
+
+
+def _json_string_close(text: str, start: int) -> int:
+    close = _quoted_key_close(text, start)
+    if close is None:
+        raise ValueError("invalid JSON string boundary")
+    return close
+
+
+def _json_value_end(text: str, start: int, *, depth: int) -> int:
+    if depth > _MAX_STRUCTURED_DIAGNOSTIC_DEPTH:
+        raise ValueError("structured diagnostic depth exceeded")
+    cursor = _skip_json_whitespace(text, start)
+    if cursor >= len(text):
+        raise ValueError("missing JSON value")
+    character = text[cursor]
+    if character == '"':
+        return _json_string_close(text, cursor) + 1
+    if character == "{":
+        cursor = _skip_json_whitespace(text, cursor + 1)
+        if cursor < len(text) and text[cursor] == "}":
+            return cursor + 1
+        while cursor < len(text):
+            if text[cursor] != '"':
+                raise ValueError("invalid JSON object key")
+            cursor = _json_string_close(text, cursor) + 1
+            cursor = _skip_json_whitespace(text, cursor)
+            if cursor >= len(text) or text[cursor] != ":":
+                raise ValueError("missing JSON object separator")
+            cursor = _json_value_end(text, cursor + 1, depth=depth + 1)
+            cursor = _skip_json_whitespace(text, cursor)
+            if cursor < len(text) and text[cursor] == "}":
+                return cursor + 1
+            if cursor >= len(text) or text[cursor] != ",":
+                raise ValueError("invalid JSON object delimiter")
+            cursor = _skip_json_whitespace(text, cursor + 1)
+        raise ValueError("unterminated JSON object")
+    if character == "[":
+        cursor = _skip_json_whitespace(text, cursor + 1)
+        if cursor < len(text) and text[cursor] == "]":
+            return cursor + 1
+        while cursor < len(text):
+            cursor = _json_value_end(text, cursor, depth=depth + 1)
+            cursor = _skip_json_whitespace(text, cursor)
+            if cursor < len(text) and text[cursor] == "]":
+                return cursor + 1
+            if cursor >= len(text) or text[cursor] != ",":
+                raise ValueError("invalid JSON array delimiter")
+            cursor = _skip_json_whitespace(text, cursor + 1)
+        raise ValueError("unterminated JSON array")
+
+    while cursor < len(text) and text[cursor] not in ",]} \t\r\n":
+        cursor += 1
+    if cursor == start:
+        raise ValueError("invalid JSON scalar")
+    return cursor
+
+
+def _decode_json_escape_layer(value: str) -> str | None:
+    output: list[str] = []
+    cursor = 0
+    changed = False
+    escapes = {
+        '"': '"',
+        "/": "/",
+        "\\": "\\",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }
+    while cursor < len(value):
+        character = value[cursor]
+        if character != "\\" or cursor + 1 >= len(value):
+            output.append(character)
+            cursor += 1
+            continue
+        escaped = value[cursor + 1]
+        if escaped == "u":
+            digits = value[cursor + 2 : cursor + 6]
+            if len(digits) == 4 and all(
+                character in "0123456789abcdefABCDEF" for character in digits
+            ):
+                output.append(chr(int(digits, 16)))
+                cursor += 6
+                changed = True
+                continue
+            output.extend(("\\", escaped))
+            cursor += 2
+            continue
+        decoded = escapes.get(escaped)
+        if decoded is None:
+            output.extend(("\\", escaped))
+            cursor += 2
+            continue
+        output.append(decoded)
+        cursor += 2
+        changed = True
+    return "".join(output) if changed else None
+
+
+def _sanitize_nested_diagnostic_value(
+    value: str,
+    *,
+    max_length: int,
+    depth: int,
+) -> str:
+    if depth > _MAX_STRUCTURED_DIAGNOSTIC_DEPTH:
+        return _REDACTED
+    if len(value) > max(max_length * 4, max_length):
+        return _REDACTED
+
+    structured = _sanitize_json_string_values(
+        value,
+        max_length=max_length,
+        depth=depth,
+    )
+    if structured is not None:
+        return structured
+
+    sanitized = _sanitize_unstructured_diagnostic(value, max_length=max_length)
+    if sanitized != value:
+        return sanitized
+
+    decoded = _decode_json_escape_layer(value)
+    if decoded is None or decoded == value:
+        return value
+    decoded_sanitized = _sanitize_nested_diagnostic_value(
+        decoded,
+        max_length=max_length,
+        depth=depth + 1,
+    )
+    return decoded_sanitized if decoded_sanitized != decoded else value
+
+
+def _collect_json_replacements(
+    text: str,
+    start: int,
+    *,
+    max_length: int,
+    depth: int,
+    replacements: list[tuple[int, int, str]],
+) -> int:
+    if depth > _MAX_STRUCTURED_DIAGNOSTIC_DEPTH:
+        raise ValueError("structured diagnostic depth exceeded")
+    cursor = _skip_json_whitespace(text, start)
+    if cursor >= len(text):
+        raise ValueError("missing JSON value")
+    character = text[cursor]
+
+    if character == '"':
+        close = _json_string_close(text, cursor)
+        decoded_value = json.loads(text[cursor : close + 1])
+        if not isinstance(decoded_value, str):
+            raise ValueError("invalid JSON string value")
+        sanitized = _sanitize_nested_diagnostic_value(
+            decoded_value,
+            max_length=max_length,
+            depth=depth + 1,
+        )
+        if sanitized != decoded_value:
+            encoded = json.dumps(sanitized, ensure_ascii=False)[1:-1]
+            replacements.append((cursor + 1, close, encoded))
+        return close + 1
+
+    if character == "{":
+        cursor = _skip_json_whitespace(text, cursor + 1)
+        if cursor < len(text) and text[cursor] == "}":
+            return cursor + 1
+        while cursor < len(text):
+            if text[cursor] != '"':
+                raise ValueError("invalid JSON object key")
+            key_close = _json_string_close(text, cursor)
+            raw_key = text[cursor + 1 : key_close]
+            decoded_key = _decode_quoted_key(raw_key, '"')
+            if decoded_key is None:
+                raise ValueError("invalid bounded JSON object key")
+            separator = _skip_json_whitespace(text, key_close + 1)
+            if separator >= len(text) or text[separator] != ":":
+                raise ValueError("missing JSON object separator")
+            value_start = _skip_json_whitespace(text, separator + 1)
+            if _secret_key(decoded_key):
+                value_end = _json_value_end(text, value_start, depth=depth + 1)
+                replacements.append(
+                    (value_start, value_end, json.dumps(_REDACTED, ensure_ascii=False))
+                )
+            else:
+                value_end = _collect_json_replacements(
+                    text,
+                    value_start,
+                    max_length=max_length,
+                    depth=depth + 1,
+                    replacements=replacements,
+                )
+            cursor = _skip_json_whitespace(text, value_end)
+            if cursor < len(text) and text[cursor] == "}":
+                return cursor + 1
+            if cursor >= len(text) or text[cursor] != ",":
+                raise ValueError("invalid JSON object delimiter")
+            cursor = _skip_json_whitespace(text, cursor + 1)
+        raise ValueError("unterminated JSON object")
+
+    if character == "[":
+        cursor = _skip_json_whitespace(text, cursor + 1)
+        if cursor < len(text) and text[cursor] == "]":
+            return cursor + 1
+        while cursor < len(text):
+            cursor = _collect_json_replacements(
+                text,
+                cursor,
+                max_length=max_length,
+                depth=depth + 1,
+                replacements=replacements,
+            )
+            cursor = _skip_json_whitespace(text, cursor)
+            if cursor < len(text) and text[cursor] == "]":
+                return cursor + 1
+            if cursor >= len(text) or text[cursor] != ",":
+                raise ValueError("invalid JSON array delimiter")
+            cursor = _skip_json_whitespace(text, cursor + 1)
+        raise ValueError("unterminated JSON array")
+
+    return _json_value_end(text, cursor, depth=depth)
+
+
+def _sanitize_json_string_values(
+    text: str,
+    *,
+    max_length: int,
+    depth: int = 0,
+) -> str | None:
     if not text.lstrip().startswith(("{", "[")):
         return None
     try:
@@ -645,45 +881,25 @@ def _sanitize_json_string_values(text: str, *, max_length: int) -> str | None:
         return None
     if not isinstance(decoded, (dict, list)):
         return None
-
-    text, failed_closed = _sanitize_quoted_assignments(text)
-    if failed_closed:
-        return text
+    if depth > _MAX_STRUCTURED_DIAGNOSTIC_DEPTH:
+        return _REDACTED
 
     replacements: list[tuple[int, int, str]] = []
-    cursor = 0
-    while cursor < len(text):
-        if text[cursor] != '"' or _is_escaped(text, cursor):
-            cursor += 1
-            continue
-        close = _quoted_key_close(text, cursor)
-        if close is None:
-            return _REDACTED
-        after = close + 1
-        while after < len(text) and text[after].isspace():
-            after += 1
-        if after < len(text) and text[after] == ":":
-            cursor = close + 1
-            continue
-
-        raw_value = text[cursor + 1 : close]
-        try:
-            decoded_value = json.loads(f'"{raw_value}"')
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return _REDACTED
-        if not isinstance(decoded_value, str):
-            return _REDACTED
-        sanitized = _sanitize_unstructured_diagnostic(
-            decoded_value,
+    try:
+        end = _collect_json_replacements(
+            text,
+            0,
             max_length=max_length,
+            depth=depth,
+            replacements=replacements,
         )
-        if sanitized != decoded_value:
-            encoded = json.dumps(sanitized, ensure_ascii=False)[1:-1]
-            replacements.append((cursor + 1, close, encoded))
-        cursor = close + 1
+    except (RecursionError, TypeError, ValueError):
+        return _REDACTED
+    if _skip_json_whitespace(text, end) != len(text):
+        return _REDACTED
 
-    for start, end, replacement in reversed(replacements):
-        text = text[:start] + replacement + text[end:]
+    for start, stop, replacement in reversed(replacements):
+        text = text[:start] + replacement + text[stop:]
     if len(text) > max_length:
         return _REDACTED
     return text

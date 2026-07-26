@@ -1794,3 +1794,171 @@ def test_valid_json_quoted_value_decoder_handles_slash_quote_and_backslash_escap
     assert "SLASH" not in rendered
     assert "BACKSLASH" not in rendered
     assert "QUOTE" not in rendered
+
+
+_RECURSIVE_STRUCTURED_VALUE_CASES = [
+    (
+        json.dumps(
+            {
+                "message": json.dumps(
+                    {"message": value, "mode": "inner"},
+                    separators=(",", ":"),
+                ),
+                "mode": "outer",
+            },
+            separators=(",", ":"),
+        ),
+        canary,
+    )
+    for value, canary in (
+        (r"Authorization\u003a Custom RECURSIVE-INNER-AUTH", "RECURSIVE-INNER-AUTH"),
+        (
+            r"Proxy-Authoriz\u0061tion\u003a Digest RECURSIVE-INNER-PROXY",
+            "RECURSIVE-INNER-PROXY",
+        ),
+        (
+            r"Set-Cook\u0069e\u003a session=RECURSIVE-INNER-COOKIE; Secure",
+            "RECURSIVE-INNER-COOKIE",
+        ),
+    )
+] + [
+    (
+        json.dumps({"message": value, "mode": "outer"}, separators=(",", ":")),
+        canary,
+    )
+    for value, canary in (
+        (r"Authorization\u003a Custom DOUBLE-ESCAPED-AUTH", "DOUBLE-ESCAPED-AUTH"),
+        (
+            r"Proxy-Authorization\u003a Digest DOUBLE-ESCAPED-PROXY",
+            "DOUBLE-ESCAPED-PROXY",
+        ),
+        (
+            r"Set-Cookie\u003a session=DOUBLE-ESCAPED-COOKIE; Secure",
+            "DOUBLE-ESCAPED-COOKIE",
+        ),
+    )
+]
+
+
+@pytest.mark.parametrize(("diagnostic", "canary"), _RECURSIVE_STRUCTURED_VALUE_CASES)
+def test_nested_and_double_escaped_structured_values_are_sanitized_recursively(
+    diagnostic: str, canary: str
+) -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    direct = sanitize_diagnostic(diagnostic)
+    nested = safe_json_dumps({"failure": {"message": diagnostic}})
+    failure = json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict())
+
+    assert isinstance(json.loads(direct), dict)
+    for output in (direct, nested, failure):
+        assert canary not in output
+        assert "<redacted>" in output
+        assert "outer" in output
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        json.dumps(
+            {"message": r"legal_authorization\u003a allowed", "mode": "outer"},
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {"message": r"marketing_cookie\u003a enabled", "mode": "outer"},
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {"message": r"authorization_status\u003a denied", "mode": "outer"},
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "message": json.dumps(
+                    {
+                        "message": r"legal_authorization\u003a allowed",
+                        "mode": "inner",
+                    },
+                    separators=(",", ":"),
+                ),
+                "mode": "outer",
+            },
+            separators=(",", ":"),
+        ),
+    ],
+)
+def test_nested_and_double_escaped_ordinary_controls_remain_visible(
+    diagnostic: str,
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert isinstance(json.loads(rendered), dict)
+    assert "<redacted>" not in rendered
+    assert "outer" in rendered
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "canary", "safe_sibling"),
+    [
+        (
+            r'["Authorization\u003a Custom ARRAY-ROOT-AUTH","safe-root"]',
+            "ARRAY-ROOT-AUTH",
+            "safe-root",
+        ),
+        (
+            r'{"items":["Proxy-Authoriz\u0061tion\u003a Digest ARRAY-NESTED-PROXY",'
+            r'"safe-proxy"],"mode":"inspect"}',
+            "ARRAY-NESTED-PROXY",
+            "safe-proxy",
+        ),
+        (
+            r'{"items":["Set-Cook\u0069e\u003a session=ARRAY-NESTED-COOKIE; Secure",'
+            r'"safe-cookie"],"mode":"inspect"}',
+            "ARRAY-NESTED-COOKIE",
+            "safe-cookie",
+        ),
+    ],
+)
+def test_json_array_string_values_preserve_structure_and_safe_siblings(
+    diagnostic: str, canary: str, safe_sibling: str
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+    parsed = json.loads(rendered)
+
+    assert canary not in rendered
+    assert "<redacted>" in rendered
+    assert safe_sibling in rendered
+    assert isinstance(parsed, (dict, list))
+
+
+def test_recursive_structured_depth_budget_fails_closed_without_leaking() -> None:
+    canary = "RECURSIVE-DEPTH-BUDGET-AUTH"
+    payload: object = {
+        "message": rf"Authorization\u003a Custom {canary}",
+        "mode": "inner",
+    }
+    for depth in range(14):
+        payload = {"child": payload, "mode": f"outer-{depth}"}
+    diagnostic = json.dumps(payload, separators=(",", ":"))
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert canary not in rendered
+    assert rendered == "<redacted>"
+
+
+def test_json_array_secret_values_remain_safe_across_nested_failure_boundaries() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostic = r'["Authorization\u003a Custom ARRAY-PUBLIC-AUTH","safe-public"]'
+    outputs = (
+        sanitize_diagnostic(diagnostic),
+        safe_json_dumps({"failure": {"message": diagnostic}}),
+        json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict()),
+    )
+
+    assert isinstance(json.loads(outputs[0]), list)
+    for output in outputs:
+        assert "ARRAY-PUBLIC-AUTH" not in output
+        assert "<redacted>" in output
+        assert "safe-public" in output
