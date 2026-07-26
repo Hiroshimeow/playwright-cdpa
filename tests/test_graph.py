@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.errors import ConflictingIdentityError, IdentityMissingError
+from playwright_gpt_core.errors import (
+    ConflictingIdentityError,
+    IdentityMissingError,
+    SchemaDriftError,
+)
 from playwright_gpt_core.graph import GraphResolver, fingerprint_node
 from playwright_gpt_core.models import TurnIdentity
 from tests.fixtures.graph_factory import graph, message
@@ -350,3 +354,98 @@ def test_internal_subturn_cannot_replace_missing_original_user_correlation() -> 
     )
     with pytest.raises(IdentityMissingError):
         GraphResolver(identity()).resolve(snapshot)
+
+
+def test_final_assistant_requires_explicit_all_recipient() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root"),
+        message("assistant-1", "assistant", "user-1", text="UNPROVEN"),
+        current="assistant-1",
+    )
+    del snapshot["mapping"]["assistant-1"]["message"]["recipient"]
+
+    with pytest.raises(SchemaDriftError, match="recipient"):
+        GraphResolver(identity()).resolve(snapshot)
+
+
+def test_tool_assistant_requires_explicit_non_all_recipient() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root"),
+        message(
+            "tool-call",
+            "assistant",
+            "user-1",
+            text="{}",
+            recipient="tool.backend",
+            content_type="code",
+        ),
+        current="tool-call",
+    )
+    del snapshot["mapping"]["tool-call"]["message"]["recipient"]
+
+    with pytest.raises(SchemaDriftError, match="recipient"):
+        GraphResolver(identity()).validate_exact_branch(snapshot)
+
+
+def test_object_valued_graph_identity_fails_closed() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root"),
+        message("assistant-1", "assistant", "user-1", text="UNPROVEN"),
+        current="assistant-1",
+    )
+    snapshot["mapping"]["user-1"]["message"]["metadata"]["turn_exchange_id"] = {
+        "malformed": True
+    }
+
+    with pytest.raises(SchemaDriftError, match="turn_exchange_id"):
+        GraphResolver(identity()).resolve(snapshot)
+
+
+def test_non_string_parent_fails_closed() -> None:
+    snapshot = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root"),
+        message("assistant-1", "assistant", "user-1", text="UNPROVEN"),
+        current="assistant-1",
+    )
+    snapshot["mapping"]["assistant-1"]["parent"] = 123
+
+    with pytest.raises(SchemaDriftError, match="parent"):
+        GraphResolver(identity()).resolve(snapshot)
+
+
+@pytest.mark.parametrize(
+    ("first_text", "second_text"),
+    [
+        ("proof_token=FIRST-SECRET", "proof_token=SECOND-SECRET"),
+        ("Authorization: Basic FIRST-SECRET", "Authorization: Basic SECOND-SECRET"),
+        (
+            "GET https://example.test/api/token/FIRST-SECRET failed",
+            "GET https://example.test/api/token/SECOND-SECRET failed",
+        ),
+    ],
+)
+def test_convergence_fingerprints_use_exact_raw_candidate_material(
+    first_text: str, second_text: str
+) -> None:
+    first = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root"),
+        message("assistant-1", "assistant", "user-1", text=first_text),
+        current="assistant-1",
+    )
+    second = graph(
+        message("root", "system", None, turn=None, request=None),
+        message("user-1", "user", "root"),
+        message("assistant-1", "assistant", "user-1", text=second_text),
+        current="assistant-1",
+    )
+
+    first_candidate = GraphResolver(identity()).resolve(first)
+    second_candidate = GraphResolver(identity()).resolve(second)
+
+    assert first_candidate.fingerprint != second_candidate.fingerprint
+    assert first_candidate.chain_fingerprint != second_candidate.chain_fingerprint

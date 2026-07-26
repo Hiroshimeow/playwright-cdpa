@@ -51,6 +51,28 @@ class UnavailableRequest(Request):
         return Response(503, {"error": "temporary"})
 
 
+class MaterializingRequest(Request):
+    async def get(self, url: str, headers: dict[str, str]):
+        self.calls.append((url, headers))
+        if url.endswith("/api/auth/session"):
+            return Response(200, {"accessToken": "token-secret"})
+        if url.endswith("/stream_status"):
+            return Response(200, {"status": "COMPLETE"})
+        return Response(404, {"detail": "not materialized"})
+
+
+@pytest.mark.asyncio
+async def test_snapshot_treats_not_yet_materialized_graph_as_absent() -> None:
+    context = Context()
+    context.request = MaterializingRequest()
+    backend = AuthenticatedBackend(context)  # type: ignore[arg-type]
+
+    snapshot = await backend.snapshot("conv-1")
+
+    assert snapshot.stream_status == "COMPLETE"
+    assert snapshot.graph is None
+
+
 @pytest.mark.asyncio
 async def test_backend_5xx_is_external_and_retryable() -> None:
     from playwright_gpt_core.errors import BackendUnavailableError

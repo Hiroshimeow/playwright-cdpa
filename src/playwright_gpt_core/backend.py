@@ -12,6 +12,7 @@ from .errors import (
     SchemaDriftError,
 )
 from .monitor import MonitorSnapshot, SnapshotSource
+from .schema import decode_identifier
 
 ORIGIN = "https://chatgpt.com"
 
@@ -26,10 +27,21 @@ class AuthenticatedBackend(SnapshotSource):
             f"/backend-api/conversation/{conversation_id}/stream_status",
             allow_not_found=True,
         )
-        graph = await self.get_json(f"/backend-api/conversation/{conversation_id}")
-        status = str(status_value.get("status") or "").upper() if status_value else ""
-        if not status:
-            raise SchemaDriftError("stream_status response has no status")
+        graph = await self.get_json(
+            f"/backend-api/conversation/{conversation_id}",
+            allow_not_found=True,
+        )
+        if status_value is None:
+            status = "NOT_FOUND"
+        else:
+            try:
+                status = decode_identifier(
+                    status_value.get("status"), "stream_status", max_length=80
+                )
+            except ValueError as exc:
+                raise SchemaDriftError(str(exc)) from exc
+            assert status is not None
+            status = status.upper()
         return MonitorSnapshot(stream_status=status, graph=graph)
 
     async def get_json(
@@ -42,13 +54,11 @@ class AuthenticatedBackend(SnapshotSource):
             token = await self._access_token()
             response = await self._get(path, token)
         if allow_not_found and response.status == 404:
-            return {"status": "NOT_FOUND"}
+            return None
         if response.status == 401:
             raise AuthenticationRequiredError("backend rejected authenticated browser session")
         if response.status >= 500 or response.status == 429:
-            raise BackendUnavailableError(
-                f"backend GET failed with HTTP {response.status}"
-            )
+            raise BackendUnavailableError(f"backend GET failed with HTTP {response.status}")
         if response.status != 200:
             raise BackendError(f"backend GET returned HTTP {response.status}")
         try:

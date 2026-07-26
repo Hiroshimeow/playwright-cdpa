@@ -18,7 +18,8 @@ class ConversationLock:
         self._fd: int | None = None
 
     def acquire(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.path.parent, 0o700)
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         deadline = time.monotonic() + max(0.0, self.timeout)
         while True:

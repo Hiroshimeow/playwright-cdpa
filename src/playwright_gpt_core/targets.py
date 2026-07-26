@@ -9,7 +9,9 @@ _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9_-]{8,160}$")
 
 
 def normalize_conversation(value: str) -> str:
-    raw = str(value or "").strip()
+    if type(value) is not str:
+        raise InvalidInputError("conversation target must be exactly a string")
+    raw = value.strip()
     if not raw:
         raise InvalidInputError("conversation target is empty")
     if "://" not in raw:

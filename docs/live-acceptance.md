@@ -291,3 +291,277 @@ stderr: 0 bytes
 ```
 
 Post-change compatibility passed on Python 3.11.15, 3.12.13, and 3.14.0. Python 3.10 remains unavailable on the host.
+
+## Replacement DEV turn 1 remediation and live evidence
+
+Date: 2026-07-26
+
+Temporary evidence root: `/tmp/pgc-dev1b-20260726`
+
+Coordination namespace: explicit `shared-cdp-9222`
+
+### Review findings closed
+
+1. Conversation mutation ownership is now deployment-wide and independent of repository-local result `state_dir`.
+2. Persisted, transport, and graph identity fields are exact bounded strings; assistant recipients are mandatory and unambiguous.
+3. Cancellation uses the same mutable-node candidate/chain convergence tracker as normal monitoring.
+4. Free-form diagnostics, URLs, parser failures, and unexpected exceptions are sanitized before persistence or output.
+
+### Live cross-store ownership matrix
+
+| Case | Local result store | Result |
+|---|---|---|
+| Fresh exact Send | `state-fresh` | exit 0, `COMPLETE`, exact `DEV1B_OK`, stderr 0 |
+| Reuse same conversation | `state-reuse` | exit 0, `COMPLETE`, exact `DEV1B_REUSE_OK`, stderr 0 |
+| Long owner | `state-owner` | exit 0, response ended `DEV1B_LONG_DONE` |
+| Immediate contender during owner | `state-contender` | exit 21, `ownership`, zero turn files, stderr 0 |
+| Foreign owner for wait-idle | `state-wait-owner` | exit 0, response ended `DEV1B_WAIT_OWNER_DONE` |
+| Cross-store `--wait-idle` | `state-waiter` | exit 0, exact `DEV1B_WAIT_OK`, stderr 0 |
+
+The coordination plane had one conversation record throughout. It contained no local result-store path, had mode `0600` under a `0700` deployment directory, and ended with `active_request_id: null`. After narrowing the process lock to atomic claim/release transitions while retaining the durable active owner, the live contention/wait-idle sequence was rerun: the contender again exited 21 with zero turn files, the owner ended `DEV1_CURRENT_OWNER_DONE`, and the cross-store waiter returned exact `DEV1_CURRENT_WAIT_OK`; combined stderr remained zero bytes.
+
+### Fresh graph-materialization race
+
+The first fresh run crossed the real frontend acceptance boundary and obtained durable conversation identity while the new graph endpoint still returned HTTP 404. It returned `UNKNOWN` with a backend failure. Three seconds later, `watch` on the same request completed with exact `DEV1_OK`, proving no resend was required.
+
+A focused regression was added before the fix. Backend snapshot now represents a not-yet-materialized graph as `None`; identity binding continues bounded polling instead of treating the transient 404 as a terminal Send failure. A fresh post-fix run completed directly with exact `DEV1B_OK`.
+
+### Helper and secret evidence
+
+The post-fix fresh record had a non-null helper close timestamp. Read-only target enumeration found zero open pages matching the persisted helper target ID. No persistent Chromium close was called.
+
+A scan of the current live stdout, stderr, local state, and shared coordination trees found no bearer/JWT values, credential assignments, cookies, authorization material, Sentinel, Turnstile, or proof material. The coordination payload keys were exactly:
+
+```text
+active_request_id
+conversation_id
+last_terminal_request_id
+revision
+schema_version
+updated_at
+```
+
+### Automated evidence
+
+```bash
+uv run pytest -ra
+# 131 passed, 5 xfailed
+
+uv run --python 3.11 pytest -q
+uv run --python 3.12 pytest -q
+uv run --python 3.14 pytest -q
+# all passed with the same five immutable prototype characterization xfails
+
+uv build
+# dist/playwright_gpt_core-0.1.0.tar.gz
+# dist/playwright_gpt_core-0.1.0-py3-none-any.whl
+```
+
+Python 3.10 remains unavailable on the host. The externally blocked hard-cancellation proof remains unchanged: Stop is exercised honestly, but no backend status explicitly proving hard cancellation has been observed.
+
+## Replacement DEV turn 2 review remediation and live evidence
+
+Date: 2026-07-26
+
+Temporary evidence root: `/tmp/pgc-dev2-20260726`
+
+### Review findings closed
+
+1. The default coordination base is absolute and frozen during validation. Relative `XDG_STATE_HOME` no longer creates repository-CWD-local coordination islands.
+2. Candidate convergence is consecutive. Normal monitor and cancellation reset on nonterminal status, absent graph, or an unresolvable exact candidate.
+3. Diagnostic secret-label normalization covers camelCase, snake_case, and kebab-case in text and URLs, including the exact REVIEW cases `accessToken`, `session_token`, `api_key`, and `proof_material`.
+4. Turn and conversation state decoding no longer coerces failure flags, enums, integers, hashes, timestamps, response metadata, or cross-field state/provenance combinations.
+
+### Cross-CWD coordination proof
+
+Two clients were constructed under different working directories with the same HOME and `XDG_STATE_HOME=relative-xdg-state`:
+
+```text
+first_root  /tmp/pgc-dev2-20260726/home/.local/state/playwright-gpt-core/coordination/cdp-ccd7d89fb667491ad03e7662
+second_root /tmp/pgc-dev2-20260726/home/.local/state/playwright-gpt-core/coordination/cdp-ccd7d89fb667491ad03e7662
+same_absolute True
+second claim: ownership conflict
+```
+
+### Existing-record live compatibility
+
+```text
+request: ce6fbaad8e2b4319b438df9df89cf0c1
+command: watch with the original explicit shared coordination namespace
+exit: 0
+state: COMPLETE
+response: DEV1_CURRENT_WAIT_OK
+stderr: 0 bytes
+```
+
+### Fresh real-frontend Send
+
+```text
+request: 2a2630e2ad6e4ca8a7dcf85b9c7f5680
+exit: 0
+state: COMPLETE
+response: DEV2_OK
+send provenance: DURABLE_HANDOFF
+turn schema: 4
+helper close timestamp persisted: yes
+open pages matching persisted helper target: 0
+stderr: 0 bytes
+secret scan: PASS
+```
+
+### Automated evidence
+
+```text
+uv run pytest -ra
+177 passed, 5 xfailed
+```
+
+The five xfails remain immutable prototype characterization tests. Hard backend cancellation was not newly observed; this remains an explicit external limitation rather than an acceptance claim.
+
+## Replacement DEV turn 3 review remediation and live evidence
+
+Date: 2026-07-26
+
+Temporary evidence root: `/tmp/pgc-dev3-20260726`
+
+### Review findings closed
+
+1. Exact-turn convergence no longer hashes redacted content. The implementation hashes exact allowlisted raw in-memory node and chain material, returns only SHA-256 digests, and therefore cannot accept two raw-different credential-shaped responses as stable.
+2. Turn persistence is bound to its public identity. Requested ID, filename stem, and embedded request ID must all match before any record is returned.
+3. The diagnostic sanitizer now applies one normalized secret grammar to structured keys, free-form assignments, query keys, and URL path markers, including generic secret/password suffixes and compound marker-plus-payload segments.
+
+### Exact existing-record compatibility
+
+```text
+CDP HTTP: 200
+request: 2a2630e2ad6e4ca8a7dcf85b9c7f5680
+exit: 0
+state: COMPLETE
+response: DEV2_OK
+stderr: 0 bytes
+runtime source: target repository src/playwright_gpt_core
+```
+
+### Fresh real-frontend Send
+
+```text
+prompt: Reply with exactly DEV3_OK
+request: 3c2de378cd2043fb8c7a5ac6dd952dd0
+exit: 0
+state: COMPLETE
+response: DEV3_OK
+send provenance: DURABLE_HANDOFF
+turn schema: 4
+helper close timestamp persisted: yes
+open pages matching persisted helper target: 0
+stderr: 0 bytes
+```
+
+### Poisoned request identity proof
+
+A file named for `requested-id` was populated with a valid schema-v4 record embedding a different request ID. Public CLI `get requested-id` returned:
+
+```text
+exit: 20
+category: corrupt_state
+message: turn record identity mismatch
+public request_id: -
+stderr: 0 bytes
+raw poisoned file: unchanged
+```
+
+Automated service regressions prove the same record is rejected by `watch`, `recover`, and `cancel` before browser construction or coordination mutation. Discovery also fails through the checked load path.
+
+### Secret and convergence proof
+
+Parameterized regressions cover raw-different response pairs shaped as proof-token assignments, authorization values, and credential-bearing URLs. Two terminal samples are insufficient after the raw mutation; a third identical raw sample is required in both monitor and cancellation paths.
+
+The live evidence state and diagnostic proof removed generic secret/password assignments and a compound credential-path payload. The sanitized state remained valid JSON. Ordinary near-match path resource names are covered separately to avoid needless diagnostic destruction.
+
+### Automated evidence
+
+```text
+uv run pytest -ra
+210 passed, 5 xfailed
+```
+
+The five xfails remain immutable prototype characterization tests. Hard backend cancellation was not newly observed and remains explicitly incomplete rather than claimed.
+
+## Replacement DEV turn 4 — credential and private-key boundary remediation
+
+Date: 2026-07-26
+
+Temporary evidence root: `/tmp/pgc-dev4-20260726`
+
+### TEST turn 3 blocker closed
+
+The normalized secret predicate now covers:
+
+```text
+credential / credentials
+qualified *_credential / *_credentials
+private_key / privateKey / compact privatekey
+qualified *_private_key
+signing_key / signingKey / compact signingkey
+qualified *_signing_key
+```
+
+The extension is shared rather than duplicated. It therefore applies to mapping keys, free-form assignments, URL query keys, compound path markers, nested diagnostic strings, `Failure`, durable state, and CLI rendering.
+
+### Bounded near-match behavior
+
+Tested public diagnostic path contexts remain visible:
+
+```text
+credentials-guide
+credentialed-user
+private-key-format
+signing-key-docs
+public-key-resource
+```
+
+Compound marker-plus-payload paths are redacted with following path context. An explicit public-context allowlist is bounded to documentation/resource terms rather than weakening secret-label recognition.
+
+### Multi-parameter query correction
+
+A focused regression found that the free-form assignment scanner could consume the remainder of a sanitized URL query because `&` was not a value delimiter. The scanner now stops unquoted values at `&`. Secret query parameters remain redacted independently while a nonsecret parameter such as `mode=inspect` remains visible.
+
+### Exact persisted rewatch
+
+```text
+CDP /json/version HTTP: 200
+request: 3c2de378cd2043fb8c7a5ac6dd952dd0
+exit: 0
+state: COMPLETE
+response: DEV3_OK
+stderr: 0 bytes
+```
+
+No new Send was required because the defect was wholly local to redaction/state/output boundaries.
+
+### Adversarial boundary proof
+
+A local corpus used generated credential, private-key, and signing-key sentinel values without writing those raw values into the report. Observed:
+
+```text
+diagnostic values removed: all true
+structured JSON values removed: all true
+Failure values removed: all true
+state-file values removed: all true
+nonsecret query context preserved: true
+state remains valid JSON: true
+CLI exit: 20
+CLI stderr: 0 bytes
+CLI values removed: true
+CLI redaction marker present: true
+evidence-tree secret scan: pass
+```
+
+### Automated evidence
+
+```text
+uv run pytest -ra
+244 passed, 5 xfailed
+```
+
+The five xfails remain immutable prototype characterization tests. Existing cancellation and external-schema limitations are unchanged.

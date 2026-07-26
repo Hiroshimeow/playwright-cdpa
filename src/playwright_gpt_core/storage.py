@@ -35,15 +35,17 @@ class StateStore:
         return self.conversations_dir / f"{digest}.json"
 
     def load(self, request_id: str) -> TurnRecord:
-        return self._load(self.turn_path(request_id), TurnRecord.from_dict)
+        path = self.turn_path(request_id)
+        record = self._load(path, TurnRecord.from_dict)
+        if record.request_id != request_id or record.request_id != path.stem:
+            raise CorruptStateError("turn record identity mismatch")
+        return record
 
     def create(self, record: TurnRecord) -> TurnRecord:
         with self.record_lock("turn", record.request_id):
             path = self.turn_path(record.request_id)
             if path.exists():
-                raise OwnershipConflictError(
-                    f"request_id {record.request_id!r} already exists"
-                )
+                raise OwnershipConflictError(f"request_id {record.request_id!r} already exists")
             saved = replace(record, revision=1)
             self._atomic_json(path, saved.to_dict())
             return saved
@@ -54,7 +56,8 @@ class StateStore:
             current_revision = self.load(record.request_id).revision if path.exists() else 0
             if expected_revision is not None and current_revision != expected_revision:
                 raise ConcurrentStateError(
-                    f"turn revision changed: expected {expected_revision}, found {current_revision}"
+                    "turn revision changed: "
+                    f"expected {expected_revision}, found {current_revision}"
                 )
             saved = replace(record, revision=current_revision + 1)
             self._atomic_json(path, saved.to_dict())
@@ -74,7 +77,9 @@ class StateStore:
     ) -> ConversationRecord:
         with self.record_lock("conversation-record", record.conversation_id):
             path = self.conversation_path(record.conversation_id)
-            current_revision = self.load_conversation(record.conversation_id).revision if path.exists() else 0
+            current_revision = (
+                self.load_conversation(record.conversation_id).revision if path.exists() else 0
+            )
             if expected_revision is not None and current_revision != expected_revision:
                 raise ConcurrentStateError(
                     "conversation revision changed: "
@@ -127,7 +132,8 @@ class StateStore:
     def record_lock(self, kind: str, identity: str) -> Iterator[None]:
         digest = hashlib.sha256(f"{kind}:{identity}".encode("utf-8")).hexdigest()
         path = self.locks_dir / f"{digest}.lock"
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(path.parent, 0o700)
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -145,13 +151,17 @@ class StateStore:
         except FileNotFoundError:
             raise
         except Exception as exc:
-            raise CorruptStateError(f"corrupt state preserved at {path}: {exc}") from exc
+            raise CorruptStateError(
+                f"corrupt state preserved for {path.stem}: {type(exc).__name__}"
+            ) from None
 
     def _atomic_json(self, path: Path, value: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(path.parent, 0o700)
         cleaned = redact(value)
         encoded = (
-            json.dumps(cleaned, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+            json.dumps(cleaned, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n"
         ).encode("utf-8")
         fd, temp_name = tempfile.mkstemp(
             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent

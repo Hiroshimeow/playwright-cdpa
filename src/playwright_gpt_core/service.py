@@ -3,18 +3,22 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 from playwright.async_api import (
     Error as PlaywrightError,
+)
+from playwright.async_api import (
     Page,
+)
+from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
 from .backend import AuthenticatedBackend
 from .config import CoreConfig
 from .connection import BrowserSession, close_page_by_target_id, page_target_id
+from .coordination import CoordinationStore
 from .errors import (
     AmbiguousOutcomeError,
     CancellationUnprovenError,
@@ -27,6 +31,7 @@ from .errors import (
     NetworkError,
     OperationTimeoutError,
     OwnershipConflictError,
+    SchemaDriftError,
 )
 from .frontend import (
     ORIGIN,
@@ -36,9 +41,9 @@ from .frontend import (
 )
 from .graph import GraphResolver, graph_fingerprints
 from .identity import discover_user_identity, merge_identity
-from .locking import ConversationLock
 from .models import Result, SendProvenance, TurnIdentity, TurnRecord, TurnState
-from .monitor import monitor_live
+from .monitor import CandidateConvergence, monitor_live
+from .schema import decode_optional_identifier
 from .storage import StateStore
 from .targets import conversation_url, normalize_conversation
 from .transport import FrontendAcceptance, send_real
@@ -59,6 +64,7 @@ class ChatGPTCore:
     def __init__(self, config: CoreConfig | None = None) -> None:
         self.config = (config or CoreConfig()).validated()
         self.store = StateStore(self.config.state_dir)
+        self.coordination = CoordinationStore(self.config.coordination_root)
 
     async def send(
         self,
@@ -69,34 +75,23 @@ class ChatGPTCore:
         wait_idle: bool = False,
         request_id: str | None = None,
     ) -> Result:
-        prompt = str(prompt)
+        if type(prompt) is not str:
+            raise InvalidInputError("prompt must be exactly a string")
         if not prompt.strip():
             raise InvalidInputError("prompt must not be empty")
         if fresh == (conversation is not None):
             raise InvalidInputError("select exactly one send target: fresh or conversation")
         conversation_id = (
-            normalize_conversation(conversation)
-            if conversation is not None
-            else None
+            normalize_conversation(conversation) if conversation is not None else None
         )
         request_id = request_id or uuid.uuid4().hex
 
         if conversation_id is not None:
-            active = self.store.load_conversation(conversation_id).active_request_id
-            if active and active != request_id:
+            active = self.coordination.load(conversation_id).active_request_id
+            if active:
                 if not wait_idle:
-                    raise OwnershipConflictError(
-                        f"conversation has active request {active}"
-                    )
-                result = await self.watch(active)
-                if result.state not in {
-                    TurnState.COMPLETE,
-                    TurnState.FAILED,
-                    TurnState.CANCELLED,
-                }:
-                    raise OwnershipConflictError(
-                        f"active request {active} did not reach a terminal state"
-                    )
+                    raise OwnershipConflictError(f"conversation has active request {active}")
+                await self._wait_for_shared_idle(conversation_id)
 
         record = TurnRecord.new(
             request_id=request_id,
@@ -115,6 +110,17 @@ class ChatGPTCore:
             conversation=conversation,
             wait_idle=True,
             request_id=request_id,
+        )
+
+    async def _wait_for_shared_idle(self, conversation_id: str) -> None:
+        deadline = time.monotonic() + self.config.timeout
+        while time.monotonic() < deadline:
+            if self.coordination.load(conversation_id).active_request_id is None:
+                return
+            await asyncio.sleep(self.config.poll)
+        active = self.coordination.load(conversation_id).active_request_id
+        raise OwnershipConflictError(
+            f"conversation remains owned by active request {active or 'unknown'}"
         )
 
     async def watch(self, request_id: str) -> Result:
@@ -197,9 +203,7 @@ class ChatGPTCore:
                 record.transition(TurnState.CANCELLED), expected_revision=record.revision
             )
             if record.target_conversation_id:
-                self._release_if_owned(
-                    record.target_conversation_id, request_id, terminal=True
-                )
+                self._release_if_owned(record.target_conversation_id, request_id, terminal=True)
             return self._result(record)
         identity = record.identity
         if identity is None or not identity.conversation_id:
@@ -210,25 +214,48 @@ class ChatGPTCore:
         conversation_id = identity.conversation_id
         page: Page | None = None
         try:
-            with ConversationLock(self.config.state_dir, conversation_id, timeout=2.0):
+            with self.coordination.lock(conversation_id, timeout=2.0):
+                owner = self.coordination.load(conversation_id).active_request_id
+                if owner != request_id:
+                    raise OwnershipConflictError(
+                        "cancellation requires the exact shared conversation owner"
+                    )
                 async with BrowserSession(self.config) as session:
                     assert session.context is not None
                     backend = AuthenticatedBackend(session.context)
                     identity = await self._ensure_monitorable_identity(record, backend)
-                    preflight = await backend.snapshot(conversation_id)
                     resolver = GraphResolver(identity)
-                    resolver.validate_exact_branch(preflight.graph or {})
-                    terminal = await self._terminal_after_cancel_observation(
-                        request_id,
-                        identity,
-                        preflight.stream_status,
-                        preflight.graph or {},
+                    convergence = CandidateConvergence(
+                        self.config.stable_samples,
+                        self.config.stable_seconds,
                     )
-                    if terminal is not None:
-                        await self._close_owned_helper(
-                            session.context, request_id
+                    deadline = time.monotonic() + min(20.0, self.config.timeout)
+                    while True:
+                        preflight = await backend.snapshot(conversation_id)
+                        terminal = await self._terminal_after_cancel_observation(
+                            request_id,
+                            identity,
+                            preflight.stream_status,
+                            preflight.graph or {},
+                            convergence,
                         )
-                        return terminal
+                        if terminal is not None:
+                            await self._close_owned_helper(session.context, request_id)
+                            return terminal
+                        if preflight.stream_status.upper() not in {
+                            "COMPLETE",
+                            "COMPLETED",
+                            "IDLE",
+                            "NOT_FOUND",
+                        }:
+                            resolver.validate_exact_branch(preflight.graph or {})
+                            break
+                        if time.monotonic() >= deadline:
+                            raise CancellationUnprovenError(
+                                "terminal backend status did not yield "
+                                "converged exact completion"
+                            )
+                        await asyncio.sleep(self.config.poll)
                     page = await session.context.new_page()
                     try:
                         await page.goto(
@@ -243,7 +270,6 @@ class ChatGPTCore:
                                 "the exact active conversation has no visible Stop control"
                             )
                         await stop.click()
-                        deadline = time.monotonic() + min(20.0, self.config.timeout)
                         observed = ""
                         while time.monotonic() < deadline:
                             snapshot = await backend.snapshot(conversation_id)
@@ -253,11 +279,10 @@ class ChatGPTCore:
                                 identity,
                                 observed,
                                 snapshot.graph or {},
+                                convergence,
                             )
                             if terminal is not None:
-                                await self._close_owned_helper(
-                                    session.context, request_id
-                                )
+                                await self._close_owned_helper(session.context, request_id)
                                 return terminal
                             await asyncio.sleep(self.config.poll)
                         raise CancellationUnprovenError(
@@ -268,9 +293,7 @@ class ChatGPTCore:
                         await page.close()
                         page = None
         except CancellationUnprovenError as exc:
-            return self._persist_cancellation_unproven(
-                self.store.load(request_id), str(exc)
-            )
+            return self._persist_cancellation_unproven(self.store.load(request_id), str(exc))
         except CoreError as exc:
             current = self.store.load(request_id)
             if current.terminal:
@@ -299,6 +322,7 @@ class ChatGPTCore:
         identity: TurnIdentity,
         status: str,
         graph: dict[str, Any],
+        convergence: CandidateConvergence,
     ) -> Result | None:
         normalized = status.upper()
         if normalized in {"CANCELLED", "CANCELED"}:
@@ -309,18 +333,19 @@ class ChatGPTCore:
                     expected_revision=current.revision,
                 )
             if identity.conversation_id:
-                self._release_if_owned(
-                    identity.conversation_id, request_id, terminal=True
-                )
+                self._release_if_owned(identity.conversation_id, request_id, terminal=True)
             return self._result(current)
+        if normalized in {"FAILED", "ERROR"}:
+            raise CancellationUnprovenError(
+                f"backend ended with {normalized} without exact cancellation proof"
+            )
         if normalized in {"COMPLETE", "COMPLETED", "IDLE", "NOT_FOUND"}:
             try:
                 candidate = GraphResolver(identity).resolve(graph)
-            except CoreError:
-                if normalized in {"COMPLETE", "COMPLETED"}:
-                    raise CancellationUnprovenError(
-                        "backend is terminal but no exact final or cancellation proof exists"
-                    )
+            except IdentityMissingError:
+                convergence.reset()
+                return None
+            if not convergence.observe(candidate):
                 return None
             current = self.store.load(request_id)
             if not current.terminal:
@@ -329,15 +354,12 @@ class ChatGPTCore:
                     expected_revision=current.revision,
                 )
             if identity.conversation_id:
-                self._release_if_owned(
-                    identity.conversation_id, request_id, terminal=True
-                )
+                self._release_if_owned(identity.conversation_id, request_id, terminal=True)
             return self._result(current, response=candidate.text)
+        convergence.reset()
         return None
 
-    def _persist_cancellation_unproven(
-        self, record: TurnRecord, message: str
-    ) -> Result:
+    def _persist_cancellation_unproven(self, record: TurnRecord, message: str) -> Result:
         failure = CancellationUnprovenError(message).as_failure()
         if not record.terminal:
             record = self.store.save(
@@ -356,10 +378,8 @@ class ChatGPTCore:
         click_entered = False
         try:
             if conversation_id is not None:
-                with ConversationLock(
-                    self.config.state_dir, conversation_id, timeout=2.0
-                ):
-                    self.store.claim_conversation(conversation_id, record.request_id)
+                with self.coordination.lock(conversation_id, timeout=2.0):
+                    self.coordination.claim(conversation_id, record.request_id)
                 claimed_conversation = conversation_id
 
             async with BrowserSession(self.config) as session:
@@ -380,9 +400,7 @@ class ChatGPTCore:
                     target_url = (
                         ORIGIN if conversation_id is None else conversation_url(conversation_id)
                     )
-                    await page.goto(
-                        target_url, wait_until="domcontentloaded", timeout=60_000
-                    )
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=60_000)
                     await verify_authenticated(page)
 
                     baseline_graph: dict[str, Any] = {}
@@ -395,9 +413,12 @@ class ChatGPTCore:
                             )
                         baseline_graph = snapshot.graph or {}
                         current_node = baseline_graph.get("current_node")
-                        pre_send_current = (
-                            str(current_node) if current_node is not None else None
-                        )
+                        try:
+                            pre_send_current = decode_optional_identifier(
+                                current_node, "current_node"
+                            )
+                        except ValueError as exc:
+                            raise SchemaDriftError(str(exc)) from exc
 
                     partial = TurnIdentity(
                         conversation_id=conversation_id,
@@ -415,14 +436,16 @@ class ChatGPTCore:
                     record = self.store.save(
                         record.transition(TurnState.PREPARING)
                         .with_identity(partial)
-                        .with_baseline(graph_fingerprints(baseline_graph)),
+                        .with_baseline(
+                            graph_fingerprints(baseline_graph)
+                            if conversation_id is not None
+                            else {}
+                        ),
                         expected_revision=record.revision,
                     )
                     await fill_composer(page, prompt)
                     record = self.store.save(
-                        record.with_send_provenance(
-                            SendProvenance.CLICK_BOUNDARY_ENTERED
-                        ),
+                        record.with_send_provenance(SendProvenance.CLICK_BOUNDARY_ENTERED),
                         expected_revision=record.revision,
                     )
                     click_entered = True
@@ -482,23 +505,18 @@ class ChatGPTCore:
                             "accepted Send has no durable conversation identity"
                         )
                     if claimed_conversation is None:
-                        with ConversationLock(
-                            self.config.state_dir,
+                        with self.coordination.lock(
                             identity.conversation_id,
                             timeout=2.0,
                         ):
-                            self.store.claim_conversation(
-                                identity.conversation_id, record.request_id
-                            )
+                            self.coordination.claim(identity.conversation_id, record.request_id)
                         claimed_conversation = identity.conversation_id
 
                     record = self.store.save(
                         current.with_identity(identity).transition(TurnState.SENT),
                         expected_revision=current.revision,
                     )
-                    identity = await self._bind_user_identity(
-                        backend, record, identity, prompt
-                    )
+                    identity = await self._bind_user_identity(backend, record, identity, prompt)
                     record = self.store.load(record.request_id)
                     record = self.store.save(
                         record.with_identity(identity)
@@ -522,9 +540,7 @@ class ChatGPTCore:
                     )
                     record = self.store.load(record.request_id)
                     record = self.store.save(
-                        record.with_response(candidate.text).transition(
-                            TurnState.COMPLETE
-                        ),
+                        record.with_response(candidate.text).transition(TurnState.COMPLETE),
                         expected_revision=record.revision,
                     )
                     self._release_if_owned(
@@ -550,9 +566,7 @@ class ChatGPTCore:
                     expected_revision=current.revision,
                 )
             if claimed_conversation and not click_entered:
-                self._release_if_owned(
-                    claimed_conversation, current.request_id, terminal=True
-                )
+                self._release_if_owned(claimed_conversation, current.request_id, terminal=True)
             return self._result(current)
         except Exception as exc:
             current = self.store.load(record.request_id)
@@ -564,9 +578,7 @@ class ChatGPTCore:
                     expected_revision=current.revision,
                 )
             if claimed_conversation and not click_entered:
-                self._release_if_owned(
-                    claimed_conversation, current.request_id, terminal=True
-                )
+                self._release_if_owned(claimed_conversation, current.request_id, terminal=True)
             return self._result(current)
 
     async def _cleanup_terminal_helper(self, request_id: str) -> None:
@@ -634,14 +646,10 @@ class ChatGPTCore:
                 return
             except ConcurrentStateError:
                 continue
-        raise AmbiguousOutcomeError(
-            "helper closure state changed repeatedly"
-        )
+        raise AmbiguousOutcomeError("helper closure state changed repeatedly")
 
     @staticmethod
-    def _unexpected_send_failure(
-        exc: Exception, *, click_entered: bool
-    ) -> Failure:
+    def _unexpected_send_failure(exc: Exception, *, click_entered: bool) -> Failure:
         if click_entered:
             return AmbiguousOutcomeError(
                 "browser operation failed after the irreversible Send boundary: "
@@ -657,7 +665,7 @@ class ChatGPTCore:
             ).as_failure()
         return Failure(
             category=FailureCategory.INVARIANT,
-            message=f"local invariant failure: {type(exc).__name__}: {exc}",
+            message=f"local invariant failure: {type(exc).__name__}",
             retryable=False,
             external=False,
         )
@@ -669,9 +677,7 @@ class ChatGPTCore:
     ) -> TurnIdentity:
         identity = record.identity
         if identity is None or not identity.conversation_id:
-            raise IdentityMissingError(
-                "persisted request lacks exact conversation identity"
-            )
+            raise IdentityMissingError("persisted request lacks exact conversation identity")
         current = self.store.load(record.request_id)
         if not identity.monitorable:
             structural_reconcile = bool(
@@ -680,7 +686,7 @@ class ChatGPTCore:
                 and current.baseline_node_fingerprints
                 and current.target_kind == "conversation"
                 and current.target_conversation_id == identity.conversation_id
-                and self.store.load_conversation(identity.conversation_id).active_request_id
+                and self.coordination.load(identity.conversation_id).active_request_id
                 == current.request_id
             )
             if not identity.has_transport_correlation and not structural_reconcile:
@@ -740,9 +746,7 @@ class ChatGPTCore:
             raise last_error
         raise IdentityMissingError("exact submitted user identity did not appear")
 
-    async def _record_watch_failure(
-        self, record: TurnRecord, exc: CoreError
-    ) -> Result:
+    async def _record_watch_failure(self, record: TurnRecord, exc: CoreError) -> Result:
         current = self.store.load(record.request_id)
         if current.terminal:
             return Result(
@@ -766,11 +770,9 @@ class ChatGPTCore:
     def _release_if_owned(
         self, conversation_id: str, request_id: str, *, terminal: bool
     ) -> None:
-        current = self.store.load_conversation(conversation_id)
+        current = self.coordination.load(conversation_id)
         if current.active_request_id == request_id:
-            self.store.release_conversation(
-                conversation_id, request_id, terminal=terminal
-            )
+            self.coordination.release(conversation_id, request_id, terminal=terminal)
 
     @staticmethod
     def _result(record: TurnRecord, *, response: str | None = None) -> Result:

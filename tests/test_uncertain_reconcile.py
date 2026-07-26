@@ -19,13 +19,37 @@ class Backend:
 
 
 @pytest.mark.asyncio
-async def test_uncertain_existing_send_reconciles_one_graph_delta_without_resend(tmp_path) -> None:
-    core = ChatGPTCore(CoreConfig(state_dir=tmp_path))
+async def test_uncertain_existing_send_reconciles_one_graph_delta_without_resend(
+    tmp_path,
+) -> None:
+    core = ChatGPTCore(
+        CoreConfig(
+            state_dir=tmp_path,
+            coordination_dir=tmp_path / "coordination",
+            deployment_id="uncertain-test",
+        )
+    )
     snapshot = graph(
         message("root", "system", None, turn=None, request=None),
-        message("old-final", "assistant", "root", text="old", turn="old-turn", request="old-request"),
-        message("new-user", "user", "old-final", text="unknown-body", turn="new-turn", request="new-request"),
-        message("new-final", "assistant", "new-user", text="NEW", turn="new-turn", request="new-request"),
+        message(
+            "old-final", "assistant", "root", text="old", turn="old-turn", request="old-request"
+        ),
+        message(
+            "new-user",
+            "user",
+            "old-final",
+            text="unknown-body",
+            turn="new-turn",
+            request="new-request",
+        ),
+        message(
+            "new-final",
+            "assistant",
+            "new-user",
+            text="NEW",
+            turn="new-turn",
+            request="new-request",
+        ),
         current="new-final",
     )
     record = TurnRecord.new(
@@ -43,7 +67,7 @@ async def test_uncertain_existing_send_reconciles_one_graph_delta_without_resend
     record = record.with_send_provenance(SendProvenance.CLICK_BOUNDARY_ENTERED)
     record = record.transition(TurnState.UNKNOWN)
     record = core.store.save(record)
-    core.store.claim_conversation("conversation-1", "req-1")
+    core.coordination.claim("conversation-1", "req-1")
     identity = await core._ensure_monitorable_identity(record, Backend(snapshot))  # type: ignore[arg-type]
     assert identity.user_message_id == "new-user"
     assert identity.turn_exchange_id == "new-turn"
@@ -53,7 +77,13 @@ async def test_uncertain_existing_send_reconciles_one_graph_delta_without_resend
 
 @pytest.mark.asyncio
 async def test_uncertain_send_without_graph_anchor_cannot_reconcile(tmp_path) -> None:
-    core = ChatGPTCore(CoreConfig(state_dir=tmp_path))
+    core = ChatGPTCore(
+        CoreConfig(
+            state_dir=tmp_path,
+            coordination_dir=tmp_path / "coordination",
+            deployment_id="uncertain-test",
+        )
+    )
     record = TurnRecord.new(request_id="req-1", prompt="not persisted")
     record = record.transition(TurnState.PREPARING)
     record = record.with_identity(TurnIdentity(conversation_id="conversation-1"))

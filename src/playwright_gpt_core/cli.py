@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
 from pathlib import Path
 
 from .config import CoreConfig
@@ -29,6 +28,8 @@ def _shared(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--send-timeout", type=float, default=90.0)
     parser.add_argument("--identity-timeout", type=float, default=30.0)
     parser.add_argument("--state-dir", default=".playwright-gpt")
+    parser.add_argument("--coordination-dir")
+    parser.add_argument("--deployment-id")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--keep-helper-tab", action="store_true")
 
@@ -63,6 +64,8 @@ def _config(args: argparse.Namespace) -> CoreConfig:
     return CoreConfig(
         cdp_endpoint=args.cdp_endpoint,
         state_dir=Path(args.state_dir),
+        coordination_dir=(Path(args.coordination_dir) if args.coordination_dir else None),
+        deployment_id=args.deployment_id,
         timeout=args.timeout,
         poll=args.poll,
         send_timeout=args.send_timeout,
@@ -138,7 +141,7 @@ def _error_result(exc: BaseException) -> Result:
     else:
         failure = Failure(
             FailureCategory.INVARIANT,
-            f"local invariant failure: {type(exc).__name__}: {exc}",
+            f"local invariant failure: {type(exc).__name__}",
         )
     return Result(1, "-", TurnState.FAILED, failure=failure)
 

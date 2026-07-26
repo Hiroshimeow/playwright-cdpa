@@ -8,8 +8,10 @@
 | `frontend.py` | Authentication readiness and real composer/Send/Stop controls |
 | `transport.py` | Passive observation and allowlisted frontend handoff reduction |
 | `backend.py` | Authenticated read-only status and graph GETs |
-| `models.py` | State machine, staged identity, result and conversation records |
-| `storage.py` | Atomic state, revisions, record locks, conversation claims |
+| `models.py` | State machine, staged identity, local result records, and shared ownership records |
+| `schema.py` | Exact, bounded, non-coercing identifier decoding |
+| `storage.py` | Atomic JSON, revisions, and record locks |
+| `coordination.py` | Deployment-wide conversation claims and mutation locks |
 | `identity.py` | Namespace-aware identity merge and exact user-node binding |
 | `graph.py` | Current-branch validation, tool-chain validation, final resolver |
 | `monitor.py` | Stream polling and bounded graph convergence |
@@ -89,7 +91,7 @@ Canonical graph fields are bound only from the exact user node and its current-b
 6. The submitted user node positively matches its persisted canonical graph identity. Within each graph segment, every present canonical turn/request field agrees.
 7. A new graph segment is allowed only at a later user-role node whose immediate parent is a tool result; a later user node below an assistant is treated as a different human turn and rejected.
 8. Tool calls have terminal tool results.
-9. The selected final is the nearest eligible terminal `assistant -> all` text node below the exact user node.
+9. Every assistant node has an explicit canonical recipient. The selected final is the nearest eligible terminal `assistant -> all` text node below the exact user node; tool-call assistants require an explicit non-`all` recipient.
 10. Candidate and exact-chain fingerprints remain unchanged across the configured sample count and stability duration after stream completion.
 
 History order, creation timestamps, latest-message heuristics, visible DOM text, and prior final responses are never success fallbacks.
@@ -106,18 +108,22 @@ Message IDs are not treated as immutable completion markers. Fingerprints cover:
 - content;
 - selected identity, model, reasoning, and tool metadata.
 
-Logging/observation fingerprints are independent from final-candidate resolution. A node with the same ID is re-evaluated whenever its fingerprint changes.
+Logging/observation fingerprints are independent from final-candidate resolution. A node with the same ID is re-evaluated whenever its fingerprint changes. Candidate stability is consecutive: a nonterminal status, absent graph, unresolvable exact candidate, or any change in exact raw allowlisted candidate/chain material resets both sample count and stability time. A later terminal observation starts a new convergence window. Fingerprints are SHA-256 digests over that raw in-memory material; redaction is deliberately not applied before hashing because it would make distinct credential-shaped responses collide. Raw graph material is never persisted or emitted by the fingerprint boundary.
 
 ## Persistence and ownership
 
-- Turn and conversation state use strict versioned JSON schemas. Turn schema v4 adds exact helper-page target ownership, exact-type and cross-field validation, and migrates schema v2/v3 records with no guessed helper identity.
+- Repository-local turn results and deployment-wide conversation ownership are separate persistence planes.
+- Turn and conversation state use strict versioned JSON schemas. Turn schema v4 validates the exact JSON type of enums, booleans, nonnegative integers, SHA-256 values, timezone-aware timestamps, identities, failures, response metadata, and helper ownership. It also validates target/identity, response/state, failure/state, and state/provenance combinations. Schema v2/v3 migration remains supported but malformed legacy values are rejected rather than coerced.
+- All persisted identity and correlation fields are decoded as exact bounded strings. Objects, arrays, booleans, numbers, null where disallowed, whitespace-only values, and control characters are rejected rather than stringified.
 - Writes use a temporary file in the same directory, file `fsync`, `os.replace`, then parent-directory `fsync`.
-- Turn and conversation records carry monotonically increasing revisions. A public request ID is create-only and can never overwrite an existing record.
-- Record updates are serialized with `fcntl.flock`.
-- A durable conversation record allows one active mutating request.
+- Turn and conversation records carry monotonically increasing revisions. A public request ID is create-only and can never overwrite an existing record. Every turn load binds three identities before returning: requested ID, filename stem, and embedded `request_id`; any mismatch is preserved as corrupt state and no browser or ownership mutation follows.
+- Record updates are serialized with `fcntl.flock`; state and coordination directories are private (`0700`) and files are `0600`.
+- The shared coordination namespace defaults to the normalized loopback CDP endpoint. `localhost`, `127.0.0.1`, and `::1` aliases for the same scheme and port converge on one namespace. The coordination base is resolved to an absolute path during configuration validation. A relative `XDG_STATE_HOME` is not interpreted relative to process CWD; the core falls back to the absolute user-state directory. Embedders may provide an explicit deployment ID and an absolute coordination base.
+- The coordination record contains no repository state path or turn payload. Clients with different local `state_dir` values still observe one active conversation owner.
+- The shared mutation lock serializes claim/release transitions. The durable active owner then blocks competing sends across preflight, the real Send, identity binding, recovery, and monitoring without holding a long-lived process lock.
 - Read-only watchers may run concurrently.
 - Immediate competing sends fail with exit 21.
-- `--wait-idle` watches the exact active request, then claims and revalidates the conversation before its own Send.
+- `--wait-idle` polls the shared claim only. It never assumes that a foreign active request is readable in the current repository-local result store. A stale foreign claim remains fail-closed.
 
 ## Restart and uncertain outcomes
 
@@ -150,11 +156,14 @@ Serialization is allowlist-first and recursively redacts:
 
 - generic token keys and `*_token` keys;
 - cookies;
-- authorization and bearer values;
+- authorization, Bearer, and Basic values;
 - access/refresh/resume/session tokens;
 - Sentinel, Turnstile, and proof material;
 - JWT-like strings;
-- passwords, secrets, and API keys.
+- passwords, secrets, and API keys;
+- credential-bearing URL userinfo, sensitive query parameters, fragments, and secret-bearing path segments. Secret labels are normalized across snake_case, kebab-case, camelCase, and compact forms. The shared predicate covers generic `*_token`, `*_secret`, `*_password`, `*_passwd`, `*_api_key`, `*_credential`, and `*_credentials` families plus bounded private/signing-key forms, as well as known access/refresh/resume/session/proof/Sentinel/Turnstile labels. A credential marker joined to payload in one path segment causes the whole segment and following path context to be redacted; explicit documentation/resource suffixes and ordinary near-matches remain visible. Free-form unquoted assignment values stop at query delimiters, so sanitizing one secret query parameter does not discard later redacted or nonsecret parameters.
+
+Free-form exception and diagnostic strings pass through the same bounded sanitizer. Unexpected exceptions expose only the exception type at the public boundary. Corrupt-state diagnostics identify the record and parser exception type without preserving or chaining raw parser text.
 
 Raw request headers, raw response headers, raw request bodies, raw response bodies, and session JSON are not persisted.
 
@@ -163,7 +172,7 @@ Raw request headers, raw response headers, raw request bodies, raw response bodi
 - Before Send: the owned request becomes `CANCELLED` without browser activity. If a dedicated helper already filled the draft, the cancellation revision makes the sender's pre-click compare-and-swap fail; the sender closes its own helper without crossing the click boundary.
 - Active turn: the core validates the exact branch before opening the exact conversation and clicking the real Stop control.
 - `CANCELLED` is persisted only when the backend status explicitly reports cancellation.
-- If the backend reaches a valid exact final, the request becomes `COMPLETE`, even if Stop was clicked.
+- If the backend reaches a valid exact final, the request becomes `COMPLETE`, even if Stop was clicked. Cancellation reuses the same mutable-node graph convergence tracker as normal monitoring. Terminal samples must be consecutive; an intervening RUNNING status, absent graph, or missing exact candidate resets convergence.
 - If neither cancellation nor an exact final can be proven, exit 23 is returned with `cancellation_unproven`; hard backend cancellation is not claimed.
 - Cancelling an already terminal request is idempotent.
 

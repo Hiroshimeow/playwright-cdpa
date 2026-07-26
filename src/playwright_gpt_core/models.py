@@ -7,6 +7,16 @@ from enum import Enum
 from typing import Any
 
 from .errors import Failure
+from .schema import (
+    decode_bounded_text,
+    decode_enum,
+    decode_identifier,
+    decode_optional_identifier,
+    decode_required_bool,
+    decode_required_int,
+    decode_sha256,
+    decode_timestamp,
+)
 
 
 def utc_now() -> str:
@@ -146,12 +156,33 @@ class TurnIdentity:
     pre_send_current_node: str | None = None
     sources: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        for name in (
+            "conversation_id",
+            "transport_turn_exchange_id",
+            "transport_request_id",
+            "stream_topic_id",
+            "turn_exchange_id",
+            "request_id",
+            "working_turn_id",
+            "user_message_id",
+            "frontend_parent_message_id",
+            "parent_message_id",
+            "pre_send_current_node",
+        ):
+            decode_optional_identifier(getattr(self, name), f"identity.{name}")
+        validated_sources: dict[str, str] = {}
+        for raw_key, raw_value in self.sources.items():
+            key = decode_identifier(raw_key, "identity source key", max_length=160)
+            value = decode_identifier(raw_value, "identity source value", max_length=160)
+            assert key is not None and value is not None
+            validated_sources[key] = value
+        object.__setattr__(self, "sources", validated_sources)
+
     @property
     def has_transport_correlation(self) -> bool:
         return bool(
-            self.transport_turn_exchange_id
-            or self.transport_request_id
-            or self.stream_topic_id
+            self.transport_turn_exchange_id or self.transport_request_id or self.stream_topic_id
         )
 
     @property
@@ -161,9 +192,7 @@ class TurnIdentity:
     @property
     def monitorable(self) -> bool:
         return bool(
-            self.conversation_id
-            and self.user_message_id
-            and self.has_graph_correlation
+            self.conversation_id and self.user_message_id and self.has_graph_correlation
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -202,15 +231,19 @@ class TurnIdentity:
             "pre_send_current_node",
         )
         fields: dict[str, Any] = {
-            name: (str(value[name]) if value.get(name) is not None else None)
+            name: decode_optional_identifier(value.get(name), f"identity.{name}")
             for name in names
         }
-        raw_sources = value.get("sources")
-        fields["sources"] = (
-            {str(key): str(item) for key, item in raw_sources.items()}
-            if isinstance(raw_sources, dict)
-            else {}
-        )
+        raw_sources = value.get("sources", {})
+        if not isinstance(raw_sources, dict):
+            raise ValueError("identity sources must be an object")
+        sources: dict[str, str] = {}
+        for raw_key, raw_item in raw_sources.items():
+            key = decode_identifier(raw_key, "identity source key", max_length=160)
+            item = decode_identifier(raw_item, "identity source value", max_length=160)
+            assert key is not None and item is not None
+            sources[key] = item
+        fields["sources"] = sources
         return cls(**fields)
 
     def safe_summary(self) -> dict[str, str | None]:
@@ -391,24 +424,77 @@ class TurnRecord:
     def from_dict(cls, value: dict[str, Any]) -> TurnRecord:
         from .errors import FailureCategory
 
-        raw_schema = value.get("schema_version")
+        if type(value) is not dict:
+            raise ValueError("turn record must be an object")
+        raw_schema = decode_required_int(value.get("schema_version"), "schema_version")
         if raw_schema not in {2, 3, 4}:
             raise ValueError("unsupported turn record schema")
-        raw_failure = value.get("failure")
+
+        known_fields = {
+            "schema_version",
+            "request_id",
+            "state",
+            "send_provenance",
+            "prompt_sha256",
+            "prompt_length",
+            "target_kind",
+            "target_conversation_id",
+            "identity",
+            "baseline_node_fingerprints",
+            "revision",
+            "created_at",
+            "updated_at",
+            "failure",
+            "response_sha256",
+            "response_length",
+            "cancellation_requested_at",
+            "helper_page_target_id",
+            "helper_page_keep",
+            "helper_page_closed_at",
+        }
+        unknown = set(value) - known_fields
+        if unknown:
+            raise ValueError(f"turn record contains unsupported fields: {sorted(unknown)!r}")
+        required = known_fields - {
+            "helper_page_target_id",
+            "helper_page_keep",
+            "helper_page_closed_at",
+        }
+        missing = required - set(value)
+        if missing:
+            raise ValueError(f"turn record is missing fields: {sorted(missing)!r}")
+
+        raw_failure = value["failure"]
         failure = None
         if raw_failure is not None:
-            if not isinstance(raw_failure, dict):
+            if type(raw_failure) is not dict:
                 raise ValueError("failure must be an object")
+            required_failure = {"category", "message", "retryable", "external"}
+            if set(raw_failure) != required_failure:
+                raise ValueError(
+                    "failure must contain exactly category, message, retryable, external"
+                )
             failure = Failure(
-                FailureCategory(str(raw_failure["category"])),
-                str(raw_failure["message"]),
-                bool(raw_failure.get("retryable")),
-                bool(raw_failure.get("external")),
+                decode_enum(raw_failure["category"], "failure.category", FailureCategory),
+                decode_bounded_text(raw_failure["message"], "failure.message", max_length=8192)
+                or "",
+                decode_required_bool(raw_failure["retryable"], "failure.retryable"),
+                decode_required_bool(raw_failure["external"], "failure.external"),
             )
-        raw_baseline = value.get("baseline_node_fingerprints")
-        if not isinstance(raw_baseline, dict):
+
+        raw_baseline = value["baseline_node_fingerprints"]
+        if type(raw_baseline) is not dict:
             raise ValueError("baseline_node_fingerprints must be an object")
-        raw_identity = value.get("identity")
+        baseline: dict[str, str] = {}
+        for raw_key, raw_fingerprint in raw_baseline.items():
+            key = decode_identifier(raw_key, "baseline node id")
+            fingerprint = decode_identifier(
+                raw_fingerprint, "baseline fingerprint", max_length=128
+            )
+            assert key is not None and fingerprint is not None
+            baseline[key] = fingerprint
+
+        raw_identity = value["identity"]
         if raw_schema == 2 and isinstance(raw_identity, dict):
             migrated = dict(raw_identity)
             old_turn = migrated.pop("turn_exchange_id", None)
@@ -422,7 +508,9 @@ class TurnRecord:
             migrated["working_turn_id"] = None
             migrated["parent_message_id"] = None
             raw_sources = migrated.get("sources")
-            sources = dict(raw_sources) if isinstance(raw_sources, dict) else {}
+            if type(raw_sources) is not dict:
+                raise ValueError("schema 2 identity sources must be an object")
+            sources = dict(raw_sources)
             if old_turn is not None:
                 sources["transport_turn_exchange_id"] = sources.pop(
                     "turn_exchange_id", "schema-2-migration"
@@ -437,42 +525,100 @@ class TurnRecord:
                 )
             migrated["sources"] = sources
             raw_identity = migrated
+
+        state = decode_enum(value["state"], "state", TurnState)
+        provenance = decode_enum(value["send_provenance"], "send_provenance", SendProvenance)
+        target_kind = decode_identifier(value["target_kind"], "target_kind", max_length=32)
+        if target_kind not in {"fresh", "conversation"}:
+            raise ValueError("target_kind must be fresh or conversation")
+        target_conversation_id = decode_optional_identifier(
+            value["target_conversation_id"], "target_conversation_id"
+        )
+        if target_kind == "conversation" and target_conversation_id is None:
+            raise ValueError("conversation target requires target_conversation_id")
+        if target_kind == "fresh" and target_conversation_id is not None:
+            raise ValueError("fresh target must not contain target_conversation_id")
+
+        response_sha256 = decode_sha256(
+            value["response_sha256"], "response_sha256", optional=True
+        )
+        response_length = (
+            None
+            if value["response_length"] is None
+            else decode_required_int(value["response_length"], "response_length")
+        )
+        if (response_sha256 is None) != (response_length is None):
+            raise ValueError("response_sha256 and response_length must be present together")
+        if state == TurnState.COMPLETE and response_sha256 is None:
+            raise ValueError("COMPLETE state requires response metadata")
+        if state != TurnState.COMPLETE and response_sha256 is not None:
+            raise ValueError("response metadata is allowed only for COMPLETE state")
+
+        if failure is not None and state not in {TurnState.FAILED, TurnState.UNKNOWN}:
+            raise ValueError("failure is allowed only for FAILED or UNKNOWN state")
+        if state == TurnState.FAILED and failure is None:
+            raise ValueError("FAILED state requires failure")
+
+        valid_provenance = {
+            TurnState.NEW: {SendProvenance.NOT_ATTEMPTED},
+            TurnState.PREPARING: {
+                SendProvenance.NOT_ATTEMPTED,
+                SendProvenance.CLICK_BOUNDARY_ENTERED,
+            },
+            TurnState.SENT: {SendProvenance.FRONTEND_ACCEPTED},
+            TurnState.RUNNING: {
+                SendProvenance.DURABLE_HANDOFF,
+                SendProvenance.RETRY_PROHIBITED,
+            },
+            TurnState.COMPLETE: {
+                SendProvenance.DURABLE_HANDOFF,
+                SendProvenance.RETRY_PROHIBITED,
+            },
+            TurnState.FAILED: {
+                SendProvenance.NOT_ATTEMPTED,
+                SendProvenance.SAFE_TO_RETRY,
+            },
+            TurnState.UNKNOWN: {SendProvenance.RETRY_PROHIBITED},
+            TurnState.CANCELLED: set(SendProvenance),
+        }
+        if provenance not in valid_provenance[state]:
+            raise ValueError(
+                f"state {state.value} is incompatible with provenance {provenance.value}"
+            )
+
+        identity = TurnIdentity.from_dict(raw_identity)
+        if (
+            target_conversation_id is not None
+            and identity is not None
+            and identity.conversation_id is not None
+            and identity.conversation_id != target_conversation_id
+        ):
+            raise ValueError("target and identity conversation IDs conflict")
+
         helper_target_id, helper_keep, helper_closed_at = _decode_helper_ownership(
             value, raw_schema
         )
         return cls(
             schema_version=4,
-            request_id=str(value["request_id"]),
-            state=TurnState(str(value["state"])),
-            send_provenance=SendProvenance(str(value["send_provenance"])),
-            prompt_sha256=str(value["prompt_sha256"]),
-            prompt_length=int(value["prompt_length"]),
-            target_kind=str(value["target_kind"]),
-            target_conversation_id=(
-                str(value["target_conversation_id"])
-                if value.get("target_conversation_id") is not None
-                else None
-            ),
-            identity=TurnIdentity.from_dict(raw_identity),
-            baseline_node_fingerprints={str(k): str(v) for k, v in raw_baseline.items()},
-            revision=int(value["revision"]),
-            created_at=str(value["created_at"]),
-            updated_at=str(value["updated_at"]),
+            request_id=decode_identifier(value["request_id"], "request_id") or "",
+            state=state,
+            send_provenance=provenance,
+            prompt_sha256=decode_sha256(value["prompt_sha256"], "prompt_sha256") or "",
+            prompt_length=decode_required_int(value["prompt_length"], "prompt_length"),
+            target_kind=target_kind,
+            target_conversation_id=target_conversation_id,
+            identity=identity,
+            baseline_node_fingerprints=baseline,
+            revision=decode_required_int(value["revision"], "revision"),
+            created_at=decode_timestamp(value["created_at"], "created_at") or "",
+            updated_at=decode_timestamp(value["updated_at"], "updated_at") or "",
             failure=failure,
-            response_sha256=(
-                str(value["response_sha256"])
-                if value.get("response_sha256")
-                else None
-            ),
-            response_length=(
-                int(value["response_length"])
-                if value.get("response_length") is not None
-                else None
-            ),
-            cancellation_requested_at=(
-                str(value["cancellation_requested_at"])
-                if value.get("cancellation_requested_at")
-                else None
+            response_sha256=response_sha256,
+            response_length=response_length,
+            cancellation_requested_at=decode_timestamp(
+                value["cancellation_requested_at"],
+                "cancellation_requested_at",
+                optional=True,
             ),
             helper_page_target_id=helper_target_id,
             helper_page_keep=helper_keep,
@@ -520,20 +666,33 @@ class ConversationRecord:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ConversationRecord:
-        if value.get("schema_version") != 1:
+        if type(value) is not dict:
+            raise ValueError("conversation record must be an object")
+        expected = {
+            "schema_version",
+            "conversation_id",
+            "active_request_id",
+            "revision",
+            "updated_at",
+            "last_terminal_request_id",
+        }
+        if set(value) != expected:
+            raise ValueError("conversation record has an invalid field set")
+        schema_version = decode_required_int(value["schema_version"], "schema_version")
+        if schema_version != 1:
             raise ValueError("unsupported conversation record schema")
         return cls(
             schema_version=1,
-            conversation_id=str(value["conversation_id"]),
-            active_request_id=(
-                str(value["active_request_id"]) if value.get("active_request_id") else None
+            conversation_id=decode_identifier(value["conversation_id"], "conversation_id")
+            or "",
+            active_request_id=decode_optional_identifier(
+                value["active_request_id"], "active_request_id"
             ),
-            revision=int(value["revision"]),
-            updated_at=str(value["updated_at"]),
-            last_terminal_request_id=(
-                str(value["last_terminal_request_id"])
-                if value.get("last_terminal_request_id")
-                else None
+            revision=decode_required_int(value["revision"], "revision"),
+            updated_at=decode_timestamp(value["updated_at"], "updated_at") or "",
+            last_terminal_request_id=decode_optional_identifier(
+                value["last_terminal_request_id"],
+                "last_terminal_request_id",
             ),
         )
 

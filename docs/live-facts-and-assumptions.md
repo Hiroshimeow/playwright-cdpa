@@ -63,3 +63,45 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - A CLI corrupt-record proof returned exit 20 with category `corrupt_state`; the raw turn file and active conversation record were byte/field unchanged and stderr was empty.
 - Schema-v2/v3 records cannot gain helper ownership from injected newer fields. Migration resets helper target to null, keep policy to false, and close marker to null.
 - An existing valid schema-v4 request still rewatched successfully with exact response `DEV3_OK` after strict decoding was enabled.
+
+## Replacement DEV turn 1 facts — July 26, 2026
+
+- A fresh Send using an explicit shared coordination base and deployment ID completed with exact response `DEV1B_OK`, exit 0, and zero stderr bytes.
+- A second process reused that conversation from a different repository-local `state_dir`; it completed with exact response `DEV1B_REUSE_OK`. The two local stores each contained one turn while the deployment had one shared conversation ownership record.
+- During a deliberately long turn, a contender using a third local `state_dir` and the same coordination namespace exited 21 with category `ownership`, created zero local turn files, and did not send. The owner completed with `DEV1B_LONG_DONE` and released the shared claim.
+- A `--wait-idle` sender using another local `state_dir` observed a foreign active claim, waited without reading the foreign turn store, then completed with exact response `DEV1B_WAIT_OK`. The shared claim was null afterward.
+- The shared coordination record contained only `active_request_id`, `conversation_id`, `last_terminal_request_id`, `revision`, `schema_version`, and `updated_at`; it contained no local state path. Directory mode was `0700` and record mode was `0600`.
+- The first fresh proof exposed a materialization race: the frontend accepted the Send while the new conversation graph still returned HTTP 404. The request remained `UNKNOWN` and exact `watch` later recovered `DEV1_OK` without duplicate Send. The backend snapshot contract was then corrected to represent graph 404 as an absent graph and allow bounded identity polling. A fresh post-fix Send completed directly with `DEV1B_OK`.
+- The post-fix fresh helper record had a durable close timestamp, and a read-only CDP target enumeration found zero pages matching its persisted helper target ID.
+- A scan of live stdout, stderr, local state, and shared coordination files found no bearer/JWT values, credential assignments, cookies, authorization material, Sentinel, Turnstile, or proof material.
+- Strict schema regressions reject non-string persisted/transport/graph identifiers and missing or malformed assistant recipients. Cancellation regression evidence proves mutable same-message-ID terminal snapshots must converge before `COMPLETE` is accepted.
+
+## Replacement DEV turn 2 review-remediation facts — July 26, 2026
+
+- With `XDG_STATE_HOME=relative-xdg-state`, two clients started from different working directories resolved the same absolute fallback coordination root under the test HOME. A claim created in the first CWD caused an `ownership` conflict in the second; no CWD-local split occurred.
+- Normal monitoring and cancellation now require consecutive exact terminal candidates. Regression sequences `COMPLETE → RUNNING → COMPLETE` and `COMPLETE → missing exact candidate → COMPLETE` no longer satisfy a two-sample convergence window; the following matching terminal sample is required.
+- Credential-label normalization now covers snake_case, kebab-case, and camelCase in free-form assignments, structured keys, URL query keys, and URL path contexts. Exact regressions for `accessToken`, `session_token`, `api_key`, and `proof_material` contain no secret value after sanitization.
+- Persisted turn and conversation records reject coercive booleans, integers, enums, hashes, timestamps, failure flags, response metadata, and invalid cross-field state/provenance combinations as `corrupt_state` before browser access.
+- The pre-existing schema-v4 request `ce6fbaad…f0c1` rewatched on CDP 9222 with exit 0, exact response `DEV1_CURRENT_WAIT_OK`, and zero stderr bytes.
+- A new real frontend Send completed with request `2a2630e2…5680`, exact response `DEV2_OK`, schema 4, `DURABLE_HANDOFF`, a persisted helper-close timestamp, zero matching open helper targets, and zero stderr bytes.
+- The DEV-turn-2 evidence tree passed the credential/JWT assignment scan. Hard backend cancellation remains externally unproven; the implementation continues to report only exact COMPLETE, explicit CANCELLED, or cancellation-unproven outcomes.
+
+## Replacement DEV turn 3 review-remediation facts — July 26, 2026
+
+- Convergence fingerprints now hash exact allowlisted raw graph material in memory and expose only SHA-256 digests. Regression pairs whose token-shaped text would sanitize to the same output now produce different node and chain fingerprints; normal monitoring and cancellation require a fresh pair of identical raw terminal samples.
+- `StateStore.load()` now requires equality among the requested ID, turn filename stem, and embedded `request_id`. Poisoned records fail as `corrupt_state` before `get`, `watch`, `recover`, `cancel`, browser construction, helper cleanup, state save, or coordination mutation. Discovery through `find_by_conversation()` uses the same checked load path.
+- Free-form sanitization now routes generic normalized assignments through the shared secret predicate, including `*_secret`, `*_password`, kebab/camel/compact equivalents, and existing token/API-key families. Credential marker plus payload in one URL path segment redacts that segment and following path context while tested ordinary near-matches remain visible.
+- Existing request `2a2630e2…5680` rewatched on CDP 9222 with exit 0, exact response `DEV2_OK`, and zero stderr bytes after these changes.
+- A fresh real frontend Send completed as request `3c2de378…2dd0`, exit 0, exact response `DEV3_OK`, schema 4, `DURABLE_HANDOFF`, a persisted helper-close timestamp, zero open pages matching the helper target, and zero stderr bytes.
+- A live poisoned-file CLI proof returned exit 20 and category `corrupt_state`; the raw file remained unchanged. Diagnostic and state-file proofs removed generic secret assignments and compound credential path payloads while preserving valid JSON.
+- Hard backend cancellation remains externally unproven; Stop behavior continues to report only explicit cancellation, exact converged completion, or cancellation-unproven.
+
+## Replacement DEV turn 4 secret-grammar facts — July 26, 2026
+
+- The shared normalized secret predicate now classifies exact and qualified `credential`/`credentials` labels plus bounded private/signing-key forms across snake_case, kebab-case, camelCase, and compact variants.
+- The same predicate is exercised by structured mappings, free-form assignments, URL query keys, URL path marker-plus-payload handling, nested diagnostics, `Failure`, atomic state writes, and CLI JSON.
+- Path sanitization preserves explicit documentation/resource contexts such as credential guides, private-key formats, signing-key docs, and public-key resources while redacting compound credential/private/signing-key payload segments.
+- Unquoted free-form assignment matching now treats `&` as a delimiter. Multiple query parameters remain independently sanitized, and a nonsecret parameter following secret parameters remains available as diagnostic context.
+- Current full-suite result is `244 passed, 5 xfailed`. The five xfails remain immutable prototype characterizations.
+- Existing exact request `3c2de378…2dd0` rewatched on CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes after this change.
+- A local adversarial corpus proved credential, private-key, and signing-key values absent from diagnostics, structured JSON, nested diagnostics, `Failure`, state files, CLI stdout, and the entire evidence tree. State remained valid JSON; CLI returned the expected invariant exit 20 with zero stderr bytes.

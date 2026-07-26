@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.models import SendProvenance, TurnRecord, TurnState
+from playwright_gpt_core.models import SendProvenance, TurnIdentity, TurnRecord, TurnState
 
 
 def test_uncertain_send_is_never_retryable() -> None:
@@ -51,9 +51,7 @@ def test_helper_target_ownership_round_trips_in_schema_four(tmp_path) -> None:
     assert saved.schema_version == 4
     assert loaded.helper_page_target_id == "target-123"
     assert loaded.helper_page_closed_at is None
-    closed = store.save(
-        loaded.with_helper_page_closed(), expected_revision=loaded.revision
-    )
+    closed = store.save(loaded.with_helper_page_closed(), expected_revision=loaded.revision)
     assert closed.helper_page_closed_at is not None
 
 
@@ -68,3 +66,23 @@ def test_schema_three_record_migrates_without_helper_ownership() -> None:
     assert migrated.helper_page_target_id is None
     assert migrated.helper_page_keep is False
     assert migrated.helper_page_closed_at is None
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [123, False, [], {}, "", "   ", "bad\u0000identity"],
+)
+def test_persisted_turn_identity_rejects_noncanonical_identifiers(malformed) -> None:
+    payload = TurnIdentity(conversation_id="conversation-1").to_dict()
+    payload["conversation_id"] = malformed
+
+    with pytest.raises(ValueError, match="conversation_id"):
+        TurnIdentity.from_dict(payload)
+
+
+def test_persisted_identity_sources_require_string_keys_and_values() -> None:
+    payload = TurnIdentity(conversation_id="conversation-1").to_dict()
+    payload["sources"] = {"conversation_id": ["frontend"]}
+
+    with pytest.raises(ValueError, match="identity source"):
+        TurnIdentity.from_dict(payload)

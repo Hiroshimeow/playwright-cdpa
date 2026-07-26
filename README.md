@@ -12,10 +12,11 @@ The core uses the real ChatGPT composer and the real Send/Stop controls. It obse
 - Persists the click boundary before the real Send click.
 - Never retries automatically after an uncertain Send.
 - Resolves only the exact current graph branch below the persisted user node.
-- Re-evaluates mutable nodes and requires bounded post-`COMPLETE` convergence.
+- Re-evaluates mutable nodes and requires consecutive bounded post-`COMPLETE` convergence; any nonterminal, missing-graph, unresolvable, or raw-content-changing observation resets the candidate window. Convergence fingerprints hash exact allowlisted in-memory graph material and expose only digests.
 - Keeps access tokens and authorization headers in memory only.
 - Persists prompt digest and length, not prompt body.
 - Uses atomic JSON replacement, file and directory `fsync`, record revisions, and POSIX file locks.
+- Separates repository-local turn results from deployment-wide conversation ownership, so clients with different `state_dir` values still serialize mutation of the same CDP conversation.
 - Persists the exact Chromium helper target ID and keep/closed policy; recovery never closes a tab by URL matching.
 
 ## Install
@@ -72,6 +73,8 @@ Shared options include:
 ```text
 --cdp-endpoint
 --state-dir
+--coordination-dir
+--deployment-id
 --timeout
 --poll
 --send-timeout
@@ -111,6 +114,10 @@ async def main() -> None:
         CoreConfig(
             cdp_endpoint="http://127.0.0.1:9222",
             state_dir=Path(".playwright-gpt"),
+            # Optional override. The default is shared under the user state
+            # directory and namespaced by the normalized CDP endpoint.
+            coordination_dir=Path("/var/tmp/playwright-gpt-coordination"),
+            deployment_id="shared-cdp-9222",
             timeout=1800,
             poll=1.0,
         )
@@ -142,18 +149,27 @@ Primary methods:
 
 Transport, state, graph resolution, locking, and browser behavior are implemented below the API and are not duplicated in the CLI.
 
-## State directory
+## Persistence and coordination
 
-Default: `.playwright-gpt/`
+Repository-local result state defaults to `.playwright-gpt/`:
 
 ```text
 .playwright-gpt/
 ├── turns/<request-id>.json
+└── locks/*.lock
+```
+
+Deployment-wide conversation ownership is separate. Its default base is an absolute `$XDG_STATE_HOME/playwright-gpt-core/coordination` when `XDG_STATE_HOME` is absolute, otherwise the core safely falls back to the absolute `~/.local/state/playwright-gpt-core/coordination`. The validated configuration freezes that base so later working-directory changes cannot move the coordination plane. It is namespaced by a digest of the normalized loopback CDP endpoint. `localhost`, `127.0.0.1`, and `::1` aliases for the same scheme and port use the same default namespace. Use `--deployment-id` when multiple persistent browser profiles share one endpoint, and use an absolute `--coordination-dir` when embedding clients must share an explicit location.
+
+```text
+<coordination-base>/<deployment-id>/
 ├── conversations/<sha256-of-conversation-id>.json
 └── locks/*.lock
 ```
 
-State schema v4 contains allowlisted identity, state-machine provenance, the exact Chromium helper target ID and keep/closed lifecycle, hashes, lengths, revisions, timestamps, and sanitized failures. Helper lifecycle fields are decoded without coercion: keep policy must be an exact JSON boolean, target identity must be null or bounded printable ASCII, and the close marker must be null or a timezone-aware ISO timestamp. Invalid state fails as `corrupt_state` before CDP connection or browser mutation. State does not contain prompt bodies, response bodies, cookies, access tokens, authorization headers, or raw network payloads.
+The coordination plane contains only conversation ID, active request ID, terminal request marker, revision, and timestamp. It never contains a repository state path or turn payload. A stale owner is not guessed away: competing send, wait-idle, and cancel operations fail closed until the exact owner is resolved.
+
+State schema v4 contains allowlisted identity, state-machine provenance, the exact Chromium helper target ID and keep/closed lifecycle, hashes, lengths, revisions, timestamps, and sanitized failures. Every persisted scalar, enum, boolean, integer, hash, timestamp, identity, helper field, and cross-field state/provenance combination is decoded without coercion. A turn file is accepted only when its filename/requested ID exactly matches the embedded request ID. Assistant graph recipients must be explicit: final candidates require `recipient == "all"`, while tool-call assistants require an explicit non-`all` recipient. Invalid state or graph schema fails closed before browser mutation. State does not contain prompt bodies, response bodies, cookies, access tokens, authorization headers, or raw network payloads. Free-form sanitization uses the same normalized secret-label predicate for structured keys, assignments, query keys, and URL path contexts, including generic `*_secret`, `*_password`, credential/credentials, private/signing-key families, compact/camel variants, and credential-marker-plus-payload path segments.
 
 ## Documentation
 

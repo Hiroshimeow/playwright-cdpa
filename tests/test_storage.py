@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from playwright_gpt_core.errors import CorruptStateError
+from playwright_gpt_core.errors import CorruptStateError, Failure, FailureCategory
 from playwright_gpt_core.models import TurnRecord, TurnState
 from playwright_gpt_core.storage import StateStore
 
@@ -19,6 +19,23 @@ def test_atomic_round_trip_and_revision(tmp_path) -> None:
     assert loaded.revision == 1
     saved2 = store.save(loaded.transition(TurnState.PREPARING), expected_revision=1)
     assert saved2.revision == 2
+
+
+def test_failure_diagnostic_is_sanitized_before_state_write(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id="failure-secret", prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(
+            FailureCategory.INVARIANT,
+            "access_token: do-not-print",
+        ),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    assert "do-not-print" not in raw
+    assert "<redacted>" in raw
 
 
 def test_corrupt_state_is_preserved_and_rejected(tmp_path) -> None:
@@ -48,9 +65,10 @@ def test_create_rejects_duplicate_request_identity(tmp_path) -> None:
     with pytest.raises(OwnershipConflictError):
         store.create(TurnRecord.new(request_id="same-request", prompt="second"))
     persisted = store.load("same-request")
-    assert persisted.prompt_sha256 == TurnRecord.new(
-        request_id="same-request", prompt="first"
-    ).prompt_sha256
+    assert (
+        persisted.prompt_sha256
+        == TurnRecord.new(request_id="same-request", prompt="first").prompt_sha256
+    )
 
 
 def _write_schema_four_helper_variant(store: StateStore, request_id: str, **changes) -> str:
@@ -93,13 +111,11 @@ def _write_schema_four_helper_variant(store: StateStore, request_id: str, **chan
         ),
     ],
 )
-def test_schema_four_rejects_malformed_helper_ownership(
-    tmp_path, changes, message
-) -> None:
+def test_schema_four_rejects_malformed_helper_ownership(tmp_path, changes, message) -> None:
     store = StateStore(tmp_path)
     raw = _write_schema_four_helper_variant(store, "bad-helper", **changes)
 
-    with pytest.raises(CorruptStateError, match=message):
+    with pytest.raises(CorruptStateError, match="corrupt state preserved"):
         store.load("bad-helper")
 
     assert store.turn_path("bad-helper").read_text(encoding="utf-8") == raw
@@ -109,9 +125,7 @@ def test_schema_four_rejects_malformed_helper_ownership(
     "missing_field",
     ["helper_page_target_id", "helper_page_keep", "helper_page_closed_at"],
 )
-def test_schema_four_requires_all_helper_ownership_fields(
-    tmp_path, missing_field
-) -> None:
+def test_schema_four_requires_all_helper_ownership_fields(tmp_path, missing_field) -> None:
     store = StateStore(tmp_path)
     value = TurnRecord.new(request_id="missing-helper", prompt="prompt").to_dict()
     value.pop(missing_field)
@@ -119,8 +133,23 @@ def test_schema_four_requires_all_helper_ownership_fields(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
 
-    with pytest.raises(CorruptStateError, match=missing_field):
+    with pytest.raises(CorruptStateError, match="corrupt state preserved"):
         store.load("missing-helper")
+
+
+def test_corrupt_state_diagnostic_does_not_echo_parser_secret(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    path = store.turn_path("secret-parser")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = TurnRecord.new(request_id="secret-parser", prompt="prompt").to_dict()
+    value["identity"] = {"conversation_id": {"access_token": "do-not-print"}}
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(CorruptStateError) as captured:
+        store.load("secret-parser")
+
+    assert "do-not-print" not in str(captured.value)
+    assert "do-not-print" not in repr(captured.value)
 
 
 def test_schema_three_ignores_untrusted_helper_fields(tmp_path) -> None:
@@ -140,3 +169,198 @@ def test_schema_three_ignores_untrusted_helper_fields(tmp_path) -> None:
     assert loaded.helper_page_target_id is None
     assert loaded.helper_page_keep is False
     assert loaded.helper_page_closed_at is None
+
+
+def _write_turn_payload(store: StateStore, request_id: str, payload: dict) -> str:
+    path = store.turn_path(request_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(payload, sort_keys=True) + "\n"
+    path.write_text(raw, encoding="utf-8")
+    return raw
+
+
+def _failed_payload(request_id: str = "strict-failure") -> dict:
+    return (
+        TurnRecord.new(request_id=request_id, prompt="prompt")
+        .transition(
+            TurnState.FAILED,
+            failure=Failure(
+                FailureCategory.TIMEOUT,
+                "temporary timeout",
+                retryable=False,
+                external=False,
+            ),
+        )
+        .to_dict()
+    )
+
+
+@pytest.mark.parametrize("field", ["retryable", "external"])
+def test_persisted_failure_flags_require_exact_booleans(tmp_path, field) -> None:
+    store = StateStore(tmp_path)
+    value = _failed_payload()
+    value["failure"][field] = "false"
+    raw = _write_turn_payload(store, "strict-failure", value)
+
+    with pytest.raises(CorruptStateError):
+        store.load("strict-failure")
+
+    assert store.turn_path("strict-failure").read_text(encoding="utf-8") == raw
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed"),
+    [
+        ("schema_version", 4.0),
+        ("state", 1),
+        ("send_provenance", False),
+        ("prompt_sha256", "not-a-sha256"),
+        ("prompt_length", "6"),
+        ("prompt_length", True),
+        ("prompt_length", -1),
+        ("target_kind", 1),
+        ("target_kind", "latest"),
+        ("revision", "1"),
+        ("revision", True),
+        ("revision", -1),
+        ("created_at", "2026-07-26T00:00:00"),
+        ("updated_at", 123),
+        ("response_sha256", 123),
+        ("response_length", "1"),
+        ("response_length", -1),
+        ("cancellation_requested_at", 123),
+    ],
+)
+def test_turn_record_rejects_coerced_or_malformed_scalars(tmp_path, field, malformed) -> None:
+    store = StateStore(tmp_path)
+    value = TurnRecord.new(request_id="strict-scalars", prompt="prompt").to_dict()
+    value[field] = malformed
+    _write_turn_payload(store, "strict-scalars", value)
+
+    with pytest.raises(CorruptStateError):
+        store.load("strict-scalars")
+
+
+def test_turn_record_rejects_non_string_baseline_fingerprint(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    value = TurnRecord.new(request_id="strict-baseline", prompt="prompt").to_dict()
+    value["baseline_node_fingerprints"] = {"node-1": 123}
+    _write_turn_payload(store, "strict-baseline", value)
+
+    with pytest.raises(CorruptStateError):
+        store.load("strict-baseline")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"target_kind": "conversation", "target_conversation_id": None},
+        {"target_kind": "fresh", "target_conversation_id": "conversation-1"},
+        {"response_sha256": "a" * 64, "response_length": None},
+        {"response_sha256": None, "response_length": 1},
+        {"state": "NEW", "send_provenance": "DURABLE_HANDOFF"},
+    ],
+)
+def test_turn_record_rejects_invalid_cross_field_combinations(tmp_path, changes) -> None:
+    store = StateStore(tmp_path)
+    value = TurnRecord.new(request_id="strict-cross-field", prompt="prompt").to_dict()
+    value.update(changes)
+    _write_turn_payload(store, "strict-cross-field", value)
+
+    with pytest.raises(CorruptStateError):
+        store.load("strict-cross-field")
+
+
+def test_state_write_sanitizes_normalized_url_and_proof_labels(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    message = (
+        "GET https://example.test/api/accessToken/URL-SECRET failed; "
+        "proof_material=PROOF-SECRET"
+    )
+    record = TurnRecord.new(request_id="normalized-secret", prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    assert "URL-SECRET" not in raw
+    assert "PROOF-SECRET" not in raw
+    assert "<redacted>" in raw
+
+
+def test_turn_file_identity_must_match_embedded_request_id(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    value = TurnRecord.new(request_id="different-id", prompt="prompt").to_dict()
+    raw = _write_turn_payload(store, "requested-id", value)
+
+    with pytest.raises(CorruptStateError, match="identity mismatch"):
+        store.load("requested-id")
+
+    assert store.turn_path("requested-id").read_text(encoding="utf-8") == raw
+    assert not store.turn_path("different-id").exists()
+
+
+def test_find_by_conversation_rejects_mismatched_turn_file_identity(tmp_path) -> None:
+    from playwright_gpt_core.models import TurnIdentity
+
+    store = StateStore(tmp_path)
+    value = (
+        TurnRecord.new(
+            request_id="different-id",
+            prompt="prompt",
+            target_kind="conversation",
+            target_conversation_id="conversation-1",
+        )
+        .with_identity(TurnIdentity(conversation_id="conversation-1"))
+        .to_dict()
+    )
+    _write_turn_payload(store, "requested-id", value)
+
+    with pytest.raises(CorruptStateError, match="identity mismatch"):
+        store.find_by_conversation("conversation-1")
+
+
+def test_state_write_sanitizes_generic_secret_assignments_and_compound_url_paths(
+    tmp_path,
+) -> None:
+    store = StateStore(tmp_path)
+    message = (
+        "client_secret=CLIENT-SECRET; db_password=DB-SECRET; "
+        "GET https://example.test/api/accessToken-URL-SECRET failed"
+    )
+    record = TurnRecord.new(request_id="generic-secret", prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    assert "CLIENT-SECRET" not in raw
+    assert "DB-SECRET" not in raw
+    assert "URL-SECRET" not in raw
+    assert "<redacted>" in raw
+
+
+def test_state_write_sanitizes_common_credentials_and_private_keys(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    message = (
+        "client_credentials=STATE-CREDENTIALS-VALUE; "
+        "private_key=STATE-PRIVATE-KEY-VALUE; "
+        "GET https://example.test/api/signingKey-STATE-SIGNING-PATH-VALUE/tail failed"
+    )
+    record = TurnRecord.new(request_id="credential-key-secret", prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    assert "STATE-CREDENTIALS-VALUE" not in raw
+    assert "STATE-PRIVATE-KEY-VALUE" not in raw
+    assert "STATE-SIGNING-PATH-VALUE" not in raw
+    assert "<redacted>" in raw
+    assert isinstance(json.loads(raw), dict)

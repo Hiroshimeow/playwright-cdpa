@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from .redaction import sanitize_diagnostic
+
 
 class FailureCategory(str, Enum):
     INVALID_INPUT = "invalid_input"
@@ -32,10 +34,19 @@ class Failure:
     retryable: bool = False
     external: bool = False
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.category, FailureCategory):
+            raise ValueError("failure category must be a FailureCategory")
+        if type(self.message) is not str:
+            raise ValueError("failure message must be exactly a string")
+        if type(self.retryable) is not bool or type(self.external) is not bool:
+            raise ValueError("failure flags must be exactly boolean")
+        object.__setattr__(self, "message", sanitize_diagnostic(self.message))
+
     def to_dict(self) -> dict[str, object]:
         return {
             "category": self.category.value,
-            "message": self.message,
+            "message": sanitize_diagnostic(self.message),
             "retryable": self.retryable,
             "external": self.external,
         }
@@ -47,7 +58,12 @@ class CoreError(RuntimeError):
     external = False
 
     def as_failure(self) -> Failure:
-        return Failure(self.category, str(self), self.retryable, self.external)
+        return Failure(
+            self.category,
+            sanitize_diagnostic(str(self)),
+            self.retryable,
+            self.external,
+        )
 
 
 class InvalidInputError(CoreError):

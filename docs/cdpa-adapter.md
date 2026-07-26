@@ -35,12 +35,12 @@ The core should own:
 | Operator Stop | `cancel(<request id>)` |
 | Dashboard status | `get(<request id>)` plus CDPA projection |
 
-CDPA should supply its durable request ID to avoid a second identity namespace. The core state directory should be repository- or deployment-scoped and excluded from product commits.
+CDPA should supply its durable request ID to avoid a second identity namespace. The adapter must use that same exact ID for the turn filename, public `get/watch/recover/cancel` calls, and embedded core request identity; it must treat any mismatch as corrupt state and must not remap or repair it heuristically. Each CDPA repository may keep its own result `state_dir`, but every worker that can mutate the same persistent CDP browser must use one shared absolute `coordination_dir` and one explicit deployment ID. The adapter must not derive that path from a repository CWD or a relative `XDG_STATE_HOME`. Neither the repository path nor local turn-store path belongs in the shared coordination record. Both persistence locations must be excluded from product commits.
 
 ## Failure mapping
 
 - Browser/network/auth failures: CDPA environmental recovery path.
-- Ownership conflict: keep the exact hop pending; never allocate another sender implicitly.
+- Ownership conflict: keep the exact hop pending; never allocate another sender implicitly. A foreign or stale shared claim must be resolved operationally; the adapter must not inspect another repository's local turn store or delete the claim heuristically.
 - Ambiguous or identity-missing outcome: retain request identity and route to exact watch/recovery, never resend.
 - Schema/invariant failure: block and require code repair/review.
 - Cancellation unproven: show Stop requested but backend outcome unknown; do not mark the hop cancelled.

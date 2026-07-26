@@ -70,6 +70,44 @@ def test_conflicting_sse_identity_fails_closed() -> None:
 
 
 def test_sse_parser_ignores_malformed_and_done() -> None:
-    assert parse_sse_events('data: nope\ndata: {"type":"ok"}\ndata: [DONE]') == [
-        {"type": "ok"}
-    ]
+    assert parse_sse_events('data: nope\ndata: {"type":"ok"}\ndata: [DONE]') == [{"type": "ok"}]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("request_id", {"bad": True}),
+        ("request_id", 123),
+    ],
+)
+def test_request_reduction_rejects_malformed_identity(field, value) -> None:
+    with pytest.raises(SchemaDriftError, match=field):
+        reduce_request_payload(
+            FakeRequest(
+                {
+                    "metadata": {field: value},
+                    "messages": [{"id": "user-1", "author": {"role": "user"}}],
+                }
+            )
+        )
+
+
+def test_request_reduction_rejects_object_message_id() -> None:
+    with pytest.raises(SchemaDriftError, match="message id"):
+        reduce_request_payload(
+            FakeRequest(
+                {
+                    "metadata": {"request_id": "request-1"},
+                    "messages": [{"id": {"bad": True}, "author": {"role": "user"}}],
+                }
+            )
+        )
+
+
+def test_handoff_reduction_rejects_object_conversation_id() -> None:
+    acceptance = FrontendAcceptance(200, "req-1", "user-1", None, None, None)
+    with pytest.raises(SchemaDriftError, match="conversation_id"):
+        reduce_handoff(
+            'data: {"conversation_id":{"bad":true},"turn_exchange_id":"turn-1"}',
+            acceptance,
+        )
