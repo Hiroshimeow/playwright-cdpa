@@ -1047,3 +1047,81 @@ def test_get_json_does_not_print_recursive_structured_diagnostic_secrets(
     assert "<redacted>" in parsed["failure"]["message"]
     assert "outer" in parsed["failure"]["message"]
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-root-immediate-auth",
+            r'"Authorization\u003a Custom CLI-ROOT-IMMEDIATE-AUTH"',
+            "CLI-ROOT-IMMEDIATE-AUTH",
+        ),
+        (
+            "cli-root-remaining-auth",
+            json.dumps(r"Authorization\u003a Custom CLI-ROOT-REMAINING-AUTH"),
+            "CLI-ROOT-REMAINING-AUTH",
+        ),
+        (
+            "cli-root-immediate-proxy",
+            r'"Proxy-Authorization\u003a Digest CLI-ROOT-IMMEDIATE-PROXY"',
+            "CLI-ROOT-IMMEDIATE-PROXY",
+        ),
+        (
+            "cli-root-remaining-proxy",
+            json.dumps(r"Proxy-Authorization\u003a Digest CLI-ROOT-REMAINING-PROXY"),
+            "CLI-ROOT-REMAINING-PROXY",
+        ),
+        (
+            "cli-root-immediate-cookie",
+            r'"Set-Cookie\u003a session=CLI-ROOT-IMMEDIATE-COOKIE; Secure"',
+            "CLI-ROOT-IMMEDIATE-COOKIE",
+        ),
+        (
+            "cli-root-remaining-cookie",
+            json.dumps(r"Set-Cookie\u003a session=CLI-ROOT-REMAINING-COOKIE; Secure"),
+            "CLI-ROOT-REMAINING-COOKIE",
+        ),
+        (
+            "cli-key-auth",
+            json.dumps({r"Authoriz\u0061tion": "CLI-KEY-AUTH", "mode": "inspect"}),
+            "CLI-KEY-AUTH",
+        ),
+        (
+            "cli-key-proxy",
+            json.dumps({r"Proxy-Authoriz\u0061tion": "CLI-KEY-PROXY", "mode": "inspect"}),
+            "CLI-KEY-PROXY",
+        ),
+        (
+            "cli-key-cookie",
+            json.dumps({r"Cook\u0069e": "CLI-KEY-COOKIE", "mode": "inspect"}),
+            "CLI-KEY-COOKIE",
+        ),
+        (
+            "cli-key-set-cookie",
+            json.dumps({r"Set-Cook\u0069e": "CLI-KEY-SET-COOKIE", "mode": "inspect"}),
+            "CLI-KEY-SET-COOKIE",
+        ),
+    ],
+)
+def test_get_json_does_not_print_json_string_root_or_recursive_key_secrets(
+    tmp_path, capsys, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    diagnostic = parsed["failure"]["message"]
+
+    assert code == 20
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert "<redacted>" in diagnostic
+    assert isinstance(json.loads(diagnostic), (dict, str))
+    assert captured.err == ""

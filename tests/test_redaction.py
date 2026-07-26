@@ -1962,3 +1962,210 @@ def test_json_array_secret_values_remain_safe_across_nested_failure_boundaries()
         assert "ARRAY-PUBLIC-AUTH" not in output
         assert "<redacted>" in output
         assert "safe-public" in output
+
+
+def _repeat_json_escape_layer(value: str, layers: int) -> str:
+    for _ in range(layers - 1):
+        value = value.replace("\\", "\\\\")
+    return value
+
+
+_JSON_STRING_ROOT_SECRET_CASES = [
+    (source, canary)
+    for base, canary_prefix in (
+        (r"Authorization\u003a Custom", "ROOT-AUTH"),
+        (r"Proxy-Authorization\u003a Digest", "ROOT-PROXY"),
+        (r"Set-Cookie\u003a session=", "ROOT-COOKIE"),
+    )
+    for source, canary in (
+        (
+            f'"{base} {canary_prefix}-IMMEDIATE"',
+            f"{canary_prefix}-IMMEDIATE",
+        ),
+        (
+            json.dumps(
+                f"{base} {canary_prefix}-REMAINING",
+                separators=(",", ":"),
+            ),
+            f"{canary_prefix}-REMAINING",
+        ),
+    )
+]
+
+
+@pytest.mark.parametrize(("diagnostic", "canary"), _JSON_STRING_ROOT_SECRET_CASES)
+def test_json_string_roots_are_recursively_sanitized_and_remain_valid_json(
+    diagnostic: str, canary: str
+) -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    direct = sanitize_diagnostic(diagnostic)
+    nested = safe_json_dumps({"failure": {"message": diagnostic}})
+    failure = json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict())
+
+    assert isinstance(json.loads(direct), str)
+    for output in (direct, nested, failure):
+        assert canary not in output
+        assert "<redacted>" in output
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        json.dumps(r"legal_authorization\u003a allowed"),
+        json.dumps(r"marketing_cookie\u003a enabled"),
+        json.dumps(r"authorization_status\u003a denied"),
+    ],
+)
+def test_json_string_root_ordinary_controls_remain_valid_and_visible(
+    diagnostic: str,
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert json.loads(rendered).split()[-1] in {"allowed", "enabled", "denied"}
+    assert "<redacted>" not in rendered
+
+
+@pytest.mark.parametrize("layers", range(1, 7))
+def test_json_string_root_escape_depths_are_bounded_and_secret_safe(layers: int) -> None:
+    canary = f"ROOT-DEPTH-{layers}"
+    value = _repeat_json_escape_layer(
+        rf"Authorization\u003a Custom {canary}",
+        layers,
+    )
+    diagnostic = json.dumps(value)
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert canary not in rendered
+    assert "<redacted>" in rendered
+    assert isinstance(json.loads(rendered), str)
+
+
+_JSON_OBJECT_ESCAPED_KEY_CASES = [
+    (
+        json.dumps(
+            {
+                _repeat_json_escape_layer(base_key, layers): canary,
+                "mode": "inspect",
+            },
+            separators=(",", ":"),
+        ),
+        canary,
+        layers,
+    )
+    for base_key, prefix in (
+        (r"Authoriz\u0061tion", "KEY-AUTH"),
+        (r"Proxy-Authoriz\u0061tion", "KEY-PROXY"),
+        (r"Cook\u0069e", "KEY-COOKIE"),
+        (r"Set-Cook\u0069e", "KEY-SET-COOKIE"),
+    )
+    for layers in range(1, 7)
+    for canary in (f"{prefix}-DEPTH-{layers}",)
+]
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "canary", "layers"),
+    _JSON_OBJECT_ESCAPED_KEY_CASES,
+)
+def test_json_object_keys_are_canonicalized_across_bounded_escape_layers(
+    diagnostic: str, canary: str, layers: int
+) -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    direct = sanitize_diagnostic(diagnostic)
+    nested = safe_json_dumps({"failure": {"message": diagnostic}})
+    failure = json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict())
+    parsed = json.loads(direct)
+
+    assert parsed["mode"] == "inspect"
+    assert canary not in direct
+    assert "<redacted>" in direct
+    assert str(layers) in canary
+    for output in (nested, failure):
+        assert canary not in output
+        assert "<redacted>" in output
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        r"legal_authoriz\u0061tion",
+        r"marketing_cook\u0069e",
+        r"authoriz\u0061tion_status",
+    ],
+)
+def test_json_object_preescaped_ordinary_keys_remain_visible(key: str) -> None:
+    diagnostic = json.dumps({key: "visible", "mode": "inspect"}, separators=(",", ":"))
+    rendered = sanitize_diagnostic(diagnostic)
+    parsed = json.loads(rendered)
+
+    assert parsed[key] == "visible"
+    assert parsed["mode"] == "inspect"
+    assert "<redacted>" not in rendered
+
+
+def _compact_unicode_escape_layers(codepoint: str, layers: int) -> str:
+    escaped = rf"\u{codepoint}"
+    for _ in range(layers - 1):
+        escaped = r"\u005c" + escaped[1:]
+    return escaped
+
+
+@pytest.mark.parametrize("layers", range(1, 7))
+def test_json_string_root_safe_controls_hold_across_escape_depths(layers: int) -> None:
+    value = "legal_authorization" + _compact_unicode_escape_layers("003a", layers) + " allowed"
+    diagnostic = json.dumps(value)
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert json.loads(rendered) == value
+    assert "<redacted>" not in rendered
+
+
+@pytest.mark.parametrize("layers", range(1, 7))
+def test_json_object_safe_keys_hold_across_escape_depths(layers: int) -> None:
+    key = "legal_authoriz" + _compact_unicode_escape_layers("0061", layers) + "tion_status"
+    diagnostic = json.dumps({key: "visible", "mode": "inspect"}, separators=(",", ":"))
+
+    rendered = sanitize_diagnostic(diagnostic)
+    parsed = json.loads(rendered)
+
+    assert parsed[key] == "visible"
+    assert parsed["mode"] == "inspect"
+    assert "<redacted>" not in rendered
+
+
+def test_json_string_root_over_depth_fails_closed_as_valid_json() -> None:
+    canary = "ROOT-OVER-DEPTH-AUTH"
+    value = "Authorization" + _compact_unicode_escape_layers("003a", 13) + f" Custom {canary}"
+
+    rendered = sanitize_diagnostic(json.dumps(value))
+
+    assert json.loads(rendered) == "<redacted>"
+    assert canary not in rendered
+
+
+def test_json_object_key_over_depth_fails_closed() -> None:
+    canary = "KEY-OVER-DEPTH-AUTH"
+    key = "Authoriz" + _compact_unicode_escape_layers("0061", 13) + "tion"
+    diagnostic = json.dumps({key: canary, "mode": "inspect"}, separators=(",", ":"))
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert canary not in rendered
+
+
+def test_json_object_key_malformed_remaining_unicode_escape_fails_closed() -> None:
+    canary = "KEY-MALFORMED-REMAINING-AUTH"
+    diagnostic = json.dumps(
+        {r"Authoriz\uZZZZtion": canary, "mode": "inspect"},
+        separators=(",", ":"),
+    )
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert canary not in rendered

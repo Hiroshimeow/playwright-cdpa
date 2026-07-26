@@ -743,6 +743,67 @@ def _decode_json_escape_layer(value: str) -> str | None:
     return "".join(output) if changed else None
 
 
+def _canonical_json_key_is_secret(value: str, *, depth: int) -> bool:
+    current = value
+    current_depth = depth
+    while True:
+        if current_depth > _MAX_STRUCTURED_DIAGNOSTIC_DEPTH:
+            raise ValueError("structured diagnostic key depth exceeded")
+        if not current or len(current) > _MAX_MAPPING_KEY:
+            raise ValueError("invalid bounded JSON object key")
+        if not all(character.isprintable() for character in current):
+            raise ValueError("control-bearing JSON object key")
+        if _secret_key(current):
+            return True
+
+        output: list[str] = []
+        cursor = 0
+        changed = False
+        escapes = {
+            '"': '"',
+            "/": "/",
+            "\\": "\\",
+            "b": "\b",
+            "f": "\f",
+            "n": "\n",
+            "r": "\r",
+            "t": "\t",
+        }
+        while cursor < len(current):
+            character = current[cursor]
+            if character != "\\":
+                output.append(character)
+                cursor += 1
+                continue
+            if cursor + 1 >= len(current):
+                raise ValueError("unterminated JSON object-key escape")
+            escaped = current[cursor + 1]
+            if escaped == "u":
+                digits = current[cursor + 2 : cursor + 6]
+                if len(digits) != 4 or not all(
+                    character in "0123456789abcdefABCDEF" for character in digits
+                ):
+                    raise ValueError("invalid JSON object-key Unicode escape")
+                output.append(chr(int(digits, 16)))
+                cursor += 6
+                changed = True
+                continue
+            decoded = escapes.get(escaped)
+            if decoded is None:
+                raise ValueError("invalid JSON object-key escape")
+            output.append(decoded)
+            cursor += 2
+            changed = True
+
+        if not changed:
+            return False
+        decoded_key = "".join(output)
+        if decoded_key == current:
+            raise ValueError("non-convergent JSON object-key canonicalization")
+        current = decoded_key
+        current_depth += 1
+
+
 def _sanitize_nested_diagnostic_value(
     value: str,
     *,
@@ -819,11 +880,12 @@ def _collect_json_replacements(
             decoded_key = _decode_quoted_key(raw_key, '"')
             if decoded_key is None:
                 raise ValueError("invalid bounded JSON object key")
+            secret_key = _canonical_json_key_is_secret(decoded_key, depth=depth)
             separator = _skip_json_whitespace(text, key_close + 1)
             if separator >= len(text) or text[separator] != ":":
                 raise ValueError("missing JSON object separator")
             value_start = _skip_json_whitespace(text, separator + 1)
-            if _secret_key(decoded_key):
+            if secret_key:
                 value_end = _json_value_end(text, value_start, depth=depth + 1)
                 replacements.append(
                     (value_start, value_end, json.dumps(_REDACTED, ensure_ascii=False))
@@ -873,16 +935,27 @@ def _sanitize_json_string_values(
     max_length: int,
     depth: int = 0,
 ) -> str | None:
-    if not text.lstrip().startswith(("{", "[")):
+    if not text.lstrip().startswith(('"', "{", "[")):
         return None
     try:
         decoded = json.loads(text)
     except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
         return None
-    if not isinstance(decoded, (dict, list)):
+    if not isinstance(decoded, (str, dict, list)):
         return None
     if depth > _MAX_STRUCTURED_DIAGNOSTIC_DEPTH:
-        return _REDACTED
+        return json.dumps(_REDACTED) if isinstance(decoded, str) else _REDACTED
+
+    if isinstance(decoded, str):
+        sanitized = _sanitize_nested_diagnostic_value(
+            decoded,
+            max_length=max_length,
+            depth=depth + 1,
+        )
+        if sanitized == decoded:
+            return text
+        rendered = json.dumps(sanitized, ensure_ascii=False)
+        return rendered if len(rendered) <= max_length else json.dumps(_REDACTED)
 
     replacements: list[tuple[int, int, str]] = []
     try:

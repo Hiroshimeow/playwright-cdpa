@@ -1128,3 +1128,77 @@ def test_state_write_sanitizes_recursive_structured_diagnostic_values(
     assert forbidden not in raw
     assert "<redacted>" in parsed["failure"]["message"]
     assert "outer" in parsed["failure"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "state-root-immediate-auth",
+            r'"Authorization\u003a Custom STATE-ROOT-IMMEDIATE-AUTH"',
+            "STATE-ROOT-IMMEDIATE-AUTH",
+        ),
+        (
+            "state-root-remaining-auth",
+            json.dumps(r"Authorization\u003a Custom STATE-ROOT-REMAINING-AUTH"),
+            "STATE-ROOT-REMAINING-AUTH",
+        ),
+        (
+            "state-root-immediate-proxy",
+            r'"Proxy-Authorization\u003a Digest STATE-ROOT-IMMEDIATE-PROXY"',
+            "STATE-ROOT-IMMEDIATE-PROXY",
+        ),
+        (
+            "state-root-remaining-proxy",
+            json.dumps(r"Proxy-Authorization\u003a Digest STATE-ROOT-REMAINING-PROXY"),
+            "STATE-ROOT-REMAINING-PROXY",
+        ),
+        (
+            "state-root-immediate-cookie",
+            r'"Set-Cookie\u003a session=STATE-ROOT-IMMEDIATE-COOKIE; Secure"',
+            "STATE-ROOT-IMMEDIATE-COOKIE",
+        ),
+        (
+            "state-root-remaining-cookie",
+            json.dumps(r"Set-Cookie\u003a session=STATE-ROOT-REMAINING-COOKIE; Secure"),
+            "STATE-ROOT-REMAINING-COOKIE",
+        ),
+        (
+            "state-key-auth",
+            json.dumps({r"Authoriz\u0061tion": "STATE-KEY-AUTH", "mode": "inspect"}),
+            "STATE-KEY-AUTH",
+        ),
+        (
+            "state-key-proxy",
+            json.dumps({r"Proxy-Authoriz\u0061tion": "STATE-KEY-PROXY", "mode": "inspect"}),
+            "STATE-KEY-PROXY",
+        ),
+        (
+            "state-key-cookie",
+            json.dumps({r"Cook\u0069e": "STATE-KEY-COOKIE", "mode": "inspect"}),
+            "STATE-KEY-COOKIE",
+        ),
+        (
+            "state-key-set-cookie",
+            json.dumps({r"Set-Cook\u0069e": "STATE-KEY-SET-COOKIE", "mode": "inspect"}),
+            "STATE-KEY-SET-COOKIE",
+        ),
+    ],
+)
+def test_state_write_sanitizes_json_string_roots_and_recursive_object_keys(
+    tmp_path, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+    diagnostic = parsed["failure"]["message"]
+
+    assert forbidden not in raw
+    assert "<redacted>" in diagnostic
+    assert isinstance(json.loads(diagnostic), (dict, str))
