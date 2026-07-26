@@ -856,3 +856,61 @@ def test_state_write_fails_closed_for_malformed_quoted_secret_key(tmp_path) -> N
     assert "STATE-MALFORMED-AUTH" not in raw
     assert "<redacted>" in raw
     assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "state-missing-close-unicode-auth",
+            r'{"Authoriz\u0061tion: STATE-MISSING-CLOSE-AUTH',
+            "STATE-MISSING-CLOSE-AUTH",
+        ),
+        (
+            "state-missing-close-unicode-proxy",
+            r'{"Proxy-Authoriz\u0061tion: STATE-MISSING-CLOSE-PROXY',
+            "STATE-MISSING-CLOSE-PROXY",
+        ),
+        (
+            "state-missing-close-unicode-cookie",
+            r'{"Set-Cook\u0069e: STATE-MISSING-CLOSE-COOKIE',
+            "STATE-MISSING-CLOSE-COOKIE",
+        ),
+        (
+            "state-missing-close-bracket-auth",
+            r'{"headers[Authoriz\u0061tion]: STATE-MISSING-CLOSE-BRACKET',
+            "STATE-MISSING-CLOSE-BRACKET",
+        ),
+        (
+            "state-missing-close-escaped-bracket-auth",
+            r'{"headers\u005bAuthorization\u005d: STATE-MISSING-CLOSE-ESCAPED-BRACKET',
+            "STATE-MISSING-CLOSE-ESCAPED-BRACKET",
+        ),
+        (
+            "state-missing-close-dotted-auth",
+            r'{"request\u002eheaders\u002eauthorization: STATE-MISSING-CLOSE-DOTTED',
+            "STATE-MISSING-CLOSE-DOTTED",
+        ),
+        (
+            "state-missing-close-single-auth",
+            r"{'Authoriz\u0061tion: STATE-MISSING-CLOSE-SINGLE",
+            "STATE-MISSING-CLOSE-SINGLE",
+        ),
+    ],
+)
+def test_state_write_fails_closed_for_missing_close_canonical_secret_key(
+    tmp_path, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+
+    assert forbidden not in raw
+    assert "<redacted>" in raw
+    assert parsed["failure"]["message"] == "<redacted>"

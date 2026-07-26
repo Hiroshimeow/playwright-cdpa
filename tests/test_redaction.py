@@ -1567,3 +1567,49 @@ def test_approved_separated_header_contexts_remain_secret(label: str) -> None:
     assert "<redacted>" in diagnostic_rendered
     assert "inspect" in mapping_rendered
     assert "inspect" in diagnostic_rendered
+
+
+_MISSING_CLOSE_CANONICAL_SECRET_KEYS = [
+    (r'{"Authoriz\u0061tion: DIRECT-MISSING-CLOSE-AUTH', "DIRECT-MISSING-CLOSE-AUTH"),
+    (
+        r'{"Proxy-Authoriz\u0061tion: DIRECT-MISSING-CLOSE-PROXY',
+        "DIRECT-MISSING-CLOSE-PROXY",
+    ),
+    (r'{"Set-Cook\u0069e: DIRECT-MISSING-CLOSE-COOKIE', "DIRECT-MISSING-CLOSE-COOKIE"),
+    (
+        r'{"headers[Authoriz\u0061tion]: DIRECT-MISSING-CLOSE-BRACKET',
+        "DIRECT-MISSING-CLOSE-BRACKET",
+    ),
+    (
+        r'{"headers\u005bAuthorization\u005d: DIRECT-MISSING-CLOSE-ESCAPED-BRACKET',
+        "DIRECT-MISSING-CLOSE-ESCAPED-BRACKET",
+    ),
+    (
+        r'{"request\u002eheaders\u002eauthorization: DIRECT-MISSING-CLOSE-DOTTED',
+        "DIRECT-MISSING-CLOSE-DOTTED",
+    ),
+    (r"{'Authoriz\u0061tion: DIRECT-MISSING-CLOSE-SINGLE", "DIRECT-MISSING-CLOSE-SINGLE"),
+]
+
+
+@pytest.mark.parametrize(("diagnostic", "canary"), _MISSING_CLOSE_CANONICAL_SECRET_KEYS)
+def test_missing_close_canonical_escaped_secret_keys_fail_closed(
+    diagnostic: str, canary: str
+) -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    outputs = (
+        sanitize_diagnostic(diagnostic),
+        safe_json_dumps({"failure": {"message": diagnostic}}),
+        json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict()),
+    )
+
+    for output in outputs:
+        assert output == "<redacted>" or "<redacted>" in output
+        assert canary not in output
+
+
+def test_missing_close_canonical_nonsecret_key_remains_visible() -> None:
+    diagnostic = r'{"mode\u002ename: PUBLIC-MISSING-CLOSE-CONTEXT'
+
+    assert sanitize_diagnostic(diagnostic) == diagnostic

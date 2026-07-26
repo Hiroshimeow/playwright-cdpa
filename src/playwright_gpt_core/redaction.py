@@ -442,14 +442,17 @@ def _quoted_assignment_value(value: str, start: int) -> tuple[int, str]:
     return end, _REDACTED
 
 
-def _malformed_secret_quoted_key(raw: str) -> bool:
+def _malformed_secret_quoted_key(raw: str, quote_character: str) -> bool:
     separator_positions = [
         position for position in (raw.find(":"), raw.find("=")) if position >= 0
     ]
     if not separator_positions:
         return False
     prefix = raw[: min(separator_positions)].strip(" \t\"'")
-    return bool(prefix) and _secret_key(prefix)
+    if not prefix:
+        return False
+    decoded_key = _decode_quoted_key(prefix, quote_character)
+    return decoded_key is None or _secret_key(decoded_key)
 
 
 def _sanitize_quoted_assignments(value: str) -> tuple[str, bool]:
@@ -473,7 +476,7 @@ def _sanitize_quoted_assignments(value: str) -> tuple[str, bool]:
             newline = re.search(r"[\r\n]", value[cursor + 1 :])
             if newline is not None:
                 line_end = cursor + 1 + newline.start()
-            if _malformed_secret_quoted_key(value[cursor + 1 : line_end]):
+            if _malformed_secret_quoted_key(value[cursor + 1 : line_end], value[cursor]):
                 return _REDACTED, True
             cursor += 1
             continue
@@ -483,7 +486,7 @@ def _sanitize_quoted_assignments(value: str) -> tuple[str, bool]:
             separator_start += 1
         if separator_start >= len(value) or value[separator_start] not in ":=":
             raw_key = value[cursor + 1 : close]
-            if _malformed_secret_quoted_key(raw_key):
+            if _malformed_secret_quoted_key(raw_key, value[cursor]):
                 return _REDACTED, True
             cursor = close + 1
             continue

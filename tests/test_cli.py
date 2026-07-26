@@ -758,3 +758,64 @@ def test_get_json_does_not_print_canonical_or_malformed_quoted_header_values(
     assert "<redacted>" in captured.out
     assert captured.err == ""
     assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-missing-close-unicode-auth",
+            r'{"Authoriz\u0061tion: CLI-MISSING-CLOSE-AUTH',
+            "CLI-MISSING-CLOSE-AUTH",
+        ),
+        (
+            "cli-missing-close-unicode-proxy",
+            r'{"Proxy-Authoriz\u0061tion: CLI-MISSING-CLOSE-PROXY',
+            "CLI-MISSING-CLOSE-PROXY",
+        ),
+        (
+            "cli-missing-close-unicode-cookie",
+            r'{"Set-Cook\u0069e: CLI-MISSING-CLOSE-COOKIE',
+            "CLI-MISSING-CLOSE-COOKIE",
+        ),
+        (
+            "cli-missing-close-bracket-auth",
+            r'{"headers[Authoriz\u0061tion]: CLI-MISSING-CLOSE-BRACKET',
+            "CLI-MISSING-CLOSE-BRACKET",
+        ),
+        (
+            "cli-missing-close-escaped-bracket-auth",
+            r'{"headers\u005bAuthorization\u005d: CLI-MISSING-CLOSE-ESCAPED-BRACKET',
+            "CLI-MISSING-CLOSE-ESCAPED-BRACKET",
+        ),
+        (
+            "cli-missing-close-dotted-auth",
+            r'{"request\u002eheaders\u002eauthorization: CLI-MISSING-CLOSE-DOTTED',
+            "CLI-MISSING-CLOSE-DOTTED",
+        ),
+        (
+            "cli-missing-close-single-auth",
+            r"{'Authoriz\u0061tion: CLI-MISSING-CLOSE-SINGLE",
+            "CLI-MISSING-CLOSE-SINGLE",
+        ),
+    ],
+)
+def test_get_json_does_not_print_missing_close_canonical_secret_values(
+    tmp_path, capsys, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+
+    assert code == 20
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert parsed["failure"]["message"] == "<redacted>"
+    assert captured.err == ""
