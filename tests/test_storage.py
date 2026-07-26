@@ -1202,3 +1202,69 @@ def test_state_write_sanitizes_json_string_roots_and_recursive_object_keys(
     assert forbidden not in raw
     assert "<redacted>" in diagnostic
     assert isinstance(json.loads(diagnostic), (dict, str))
+
+
+def _native_mapping_unicode_escape_layers(codepoint: str, layers: int) -> str:
+    escaped = rf"\u{codepoint}"
+    for _ in range(layers - 1):
+        escaped = r"\u005c" + escaped[1:]
+    return escaped
+
+
+@pytest.mark.parametrize(
+    ("prefix", "codepoint", "suffix", "label"),
+    [
+        ("Authoriz", "0061", "tion", "AUTH"),
+        ("Proxy-Authoriz", "0061", "tion", "PROXY"),
+        ("Cook", "0069", "e", "COOKIE"),
+        ("Set-Cook", "0069", "e", "SET-COOKIE"),
+    ],
+)
+@pytest.mark.parametrize("layers", range(1, 7))
+def test_atomic_json_canonicalizes_native_mapping_keys_before_persistence(
+    tmp_path,
+    prefix: str,
+    codepoint: str,
+    suffix: str,
+    label: str,
+    layers: int,
+) -> None:
+    store = StateStore(tmp_path / "state")
+    key = prefix + _native_mapping_unicode_escape_layers(codepoint, layers) + suffix
+    canary = f"ATOMIC-NATIVE-{label}-DEPTH-{layers}"
+    path = tmp_path / f"native-{label.lower()}-{layers}.json"
+
+    store._atomic_json(path, {key: canary, "mode": "inspect"})
+    raw = path.read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+
+    assert canary not in raw
+    assert parsed[key] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        r"Authoriz\uZZZZtion",
+        "Authoriz\x61tion",
+        "Authoriz\\",
+        "Authoriz\x00ation".replace("\\x00", "\x00"),
+        "x" * 257,
+        "Authoriz" + _native_mapping_unicode_escape_layers("0061", 13) + "tion",
+    ],
+)
+def test_atomic_json_fails_closed_for_unprovable_native_mapping_keys(
+    tmp_path, key: str
+) -> None:
+    store = StateStore(tmp_path / "state")
+    path = tmp_path / "native-unprovable.json"
+    canary = "ATOMIC-NATIVE-UNPROVABLE-CANARY"
+
+    store._atomic_json(path, {key: canary, "mode": "inspect"})
+    raw = path.read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+
+    assert canary not in raw
+    assert "<redacted>" in parsed.values()
+    assert parsed["mode"] == "inspect"

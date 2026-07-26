@@ -999,11 +999,20 @@ def redact(value: Any, *, _depth: int = 0) -> Any:
         for raw_key, raw_value in value.items():
             raw_key_text = raw_key if isinstance(raw_key, str) else str(raw_key)
             key = sanitize_diagnostic(raw_key_text, max_length=_MAX_MAPPING_KEY)
-            output[key] = (
-                _REDACTED
-                if len(raw_key_text) > _MAX_MAPPING_KEY or _secret_key(key)
-                else redact(raw_value, _depth=_depth + 1)
+            if isinstance(raw_key, str):
+                try:
+                    canonical_secret = _canonical_json_key_is_secret(
+                        raw_key,
+                        depth=_depth,
+                    )
+                except ValueError:
+                    canonical_secret = True
+            else:
+                canonical_secret = False
+            value_is_secret = (
+                len(raw_key_text) > _MAX_MAPPING_KEY or _secret_key(key) or canonical_secret
             )
+            output[key] = _REDACTED if value_is_secret else redact(raw_value, _depth=_depth + 1)
         return output
     if isinstance(value, (list, tuple, set, frozenset)):
         return [redact(item, _depth=_depth + 1) for item in list(value)[:500]]

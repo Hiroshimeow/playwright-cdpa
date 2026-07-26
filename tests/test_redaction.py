@@ -2169,3 +2169,89 @@ def test_json_object_key_malformed_remaining_unicode_escape_fails_closed() -> No
 
     assert rendered == "<redacted>"
     assert canary not in rendered
+
+
+_NATIVE_MAPPING_ESCAPED_KEY_CASES = [
+    (
+        prefix + _compact_unicode_escape_layers(codepoint, layers) + suffix,
+        f"NATIVE-{label}-DEPTH-{layers}",
+        layers,
+    )
+    for prefix, codepoint, suffix, label in (
+        ("Authoriz", "0061", "tion", "AUTH"),
+        ("Proxy-Authoriz", "0061", "tion", "PROXY"),
+        ("Cook", "0069", "e", "COOKIE"),
+        ("Set-Cook", "0069", "e", "SET-COOKIE"),
+    )
+    for layers in range(1, 7)
+]
+
+
+@pytest.mark.parametrize(
+    ("key", "canary", "layers"),
+    _NATIVE_MAPPING_ESCAPED_KEY_CASES,
+)
+def test_native_mapping_keys_use_canonical_escape_layer_classification(
+    key: str, canary: str, layers: int
+) -> None:
+    cleaned = redact({key: canary, "mode": "inspect"})
+    rendered = safe_json_dumps({key: canary, "mode": "inspect"})
+    parsed = json.loads(rendered)
+
+    assert cleaned[key] == "<redacted>"
+    assert cleaned["mode"] == "inspect"
+    assert parsed[key] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+    assert canary not in rendered
+    assert str(layers) in canary
+
+
+@pytest.mark.parametrize("layers", range(1, 7))
+def test_native_mapping_safe_keys_hold_across_escape_depths(layers: int) -> None:
+    key = "legal_authoriz" + _compact_unicode_escape_layers("0061", layers) + "tion_status"
+
+    cleaned = redact({key: "visible", "mode": "inspect"})
+    rendered = safe_json_dumps({key: "visible", "mode": "inspect"})
+
+    assert cleaned[key] == "visible"
+    assert cleaned["mode"] == "inspect"
+    assert json.loads(rendered)[key] == "visible"
+    assert "<redacted>" not in rendered
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        r"Authoriz\uZZZZtion",
+        "Authoriz\x61tion",
+        "Authoriz\\",
+        "Authoriz\x00ation".replace("\\x00", "\x00"),
+        "x" * 257,
+        "Authoriz" + _compact_unicode_escape_layers("0061", 13) + "tion",
+    ],
+)
+def test_native_mapping_unprovable_keys_fail_closed_for_associated_value(
+    key: str,
+) -> None:
+    canary = "NATIVE-UNPROVABLE-KEY-CANARY"
+
+    cleaned = redact({key: canary, "mode": "inspect"})
+    rendered = safe_json_dumps({key: canary, "mode": "inspect"})
+
+    assert canary not in cleaned.values()
+    assert canary not in rendered
+    assert "<redacted>" in cleaned.values()
+    assert "<redacted>" in rendered
+    assert cleaned["mode"] == "inspect"
+
+
+def test_native_mapping_non_string_keys_preserve_existing_coercion_policy() -> None:
+    class DirectSecretKey:
+        def __str__(self) -> str:
+            return "authorization"
+
+    visible = redact({7: "visible"})
+    secret = redact({DirectSecretKey(): "hidden"})
+
+    assert visible == {"7": "visible"}
+    assert secret == {"authorization": "<redacted>"}
