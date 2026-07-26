@@ -1268,3 +1268,162 @@ def test_atomic_json_fails_closed_for_unprovable_native_mapping_keys(
     assert canary not in raw
     assert "<redacted>" in parsed.values()
     assert parsed["mode"] == "inspect"
+
+
+class _AtomicStringifiedKey:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __str__(self) -> str:
+        return self.text
+
+
+@pytest.mark.parametrize(
+    ("prefix", "codepoint", "suffix", "label"),
+    [
+        ("Authoriz", "0061", "tion", "AUTH"),
+        ("Proxy-Authoriz", "0061", "tion", "PROXY"),
+        ("Cook", "0069", "e", "COOKIE"),
+        ("Set-Cook", "0069", "e", "SET-COOKIE"),
+    ],
+)
+@pytest.mark.parametrize("layers", [1, 2, 6])
+def test_atomic_json_canonicalizes_non_string_mapping_key_text(
+    tmp_path,
+    prefix: str,
+    codepoint: str,
+    suffix: str,
+    label: str,
+    layers: int,
+) -> None:
+    store = StateStore(tmp_path / "state")
+    key_text = prefix + _native_mapping_unicode_escape_layers(codepoint, layers) + suffix
+    key = _AtomicStringifiedKey(key_text)
+    canary = f"ATOMIC-COERCED-{label}-DEPTH-{layers}"
+    path = tmp_path / f"coerced-{label.lower()}-{layers}.json"
+
+    store._atomic_json(path, {key: canary, "mode": "inspect"})
+    raw = path.read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+
+    assert canary not in raw
+    assert parsed[key_text] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "key", "canary"),
+    [
+        (
+            "state-secret-key-token-auth",
+            r"Authorization\u003a Bearer STATE-KEY-TOKEN-AUTH",
+            "STATE-KEY-TOKEN-AUTH",
+        ),
+        (
+            "state-secret-key-token-basic",
+            r"Authorization\u003a Basic STATE-KEY-TOKEN-BASIC",
+            "STATE-KEY-TOKEN-BASIC",
+        ),
+        (
+            "state-secret-key-token-proxy",
+            r"Proxy-Authorization\u003a Digest response=STATE-KEY-TOKEN-PROXY",
+            "STATE-KEY-TOKEN-PROXY",
+        ),
+        (
+            "state-secret-key-token-cookie",
+            r"Cookie\u003a session=STATE-KEY-TOKEN-COOKIE",
+            "STATE-KEY-TOKEN-COOKIE",
+        ),
+        (
+            "state-secret-key-token-set-cookie",
+            r"Set-Cookie\u003a session=STATE-KEY-TOKEN-SET-COOKIE",
+            "STATE-KEY-TOKEN-SET-COOKIE",
+        ),
+    ],
+)
+def test_state_write_does_not_persist_secret_material_in_json_key_tokens(
+    tmp_path, request_id: str, key: str, canary: str
+) -> None:
+    diagnostic = json.dumps({key: "ordinary", "mode": "inspect"}, separators=(",", ":"))
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, diagnostic),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+
+    assert canary not in raw
+    assert parsed["failure"]["message"] == "<redacted>"
+
+
+def _large_state_diagnostic(canary: str, *, position: str) -> str:
+    secret = rf"Authorization\u003a Custom {canary}"
+    padding = "x" * 40000
+    if position == "start":
+        payload = {"message": secret, "padding": padding, "mode": "inspect"}
+    elif position == "middle":
+        payload = {"before": padding, "message": secret, "after": padding}
+    elif position == "end":
+        payload = {"padding": padding, "mode": "inspect", "message": secret}
+    else:
+        raise AssertionError(position)
+    return json.dumps(payload, separators=(",", ":"))
+
+
+@pytest.mark.parametrize("position", ["start", "middle", "end"])
+def test_state_write_never_persists_canary_from_over_budget_structured_diagnostic(
+    tmp_path, position: str
+) -> None:
+    canary = f"STATE-LARGE-{position.upper()}-AUTH"
+    diagnostic = _large_state_diagnostic(canary, position=position)
+    store = StateStore(tmp_path)
+    request_id = f"state-large-{position}"
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, diagnostic),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+    loaded = store.load(request_id)
+
+    assert canary not in raw
+    assert parsed["failure"]["message"] == "<redacted>"
+    assert loaded.failure is not None
+    assert loaded.failure.message == "<redacted>"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "key", "canary"),
+    [
+        (
+            "state-secret-key-token-access",
+            r"access_token\u003dSTATE-KEY-TOKEN-ACCESS",
+            "STATE-KEY-TOKEN-ACCESS",
+        ),
+        (
+            "state-secret-key-token-proof",
+            r"proof_token\u003dSTATE-KEY-TOKEN-PROOF",
+            "STATE-KEY-TOKEN-PROOF",
+        ),
+    ],
+)
+def test_state_write_does_not_persist_secret_assignments_in_json_key_tokens(
+    tmp_path, request_id: str, key: str, canary: str
+) -> None:
+    diagnostic = json.dumps({key: "ordinary", "mode": "inspect"}, separators=(",", ":"))
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, diagnostic),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+
+    assert canary not in raw
+    assert json.loads(raw)["failure"]["message"] == "<redacted>"

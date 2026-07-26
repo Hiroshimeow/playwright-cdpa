@@ -753,6 +753,8 @@ def _canonical_json_key_is_secret(value: str, *, depth: int) -> bool:
             raise ValueError("invalid bounded JSON object key")
         if not all(character.isprintable() for character in current):
             raise ValueError("control-bearing JSON object key")
+        if _plain_text_has_secret_boundary(current):
+            raise ValueError("secret-bearing JSON object key token")
         if _secret_key(current):
             return True
 
@@ -980,7 +982,11 @@ def _sanitize_json_string_values(
 
 def sanitize_diagnostic(value: Any, *, max_length: int = _MAX_DIAGNOSTIC) -> str:
     text = value if isinstance(value, str) else str(value)
-    text = text[: max(max_length * 4, max_length)]
+    input_budget = max(max_length * 4, max_length)
+    stripped = text.lstrip()
+    if len(text) > input_budget and stripped.startswith(('"', "{", "[")):
+        return json.dumps(_REDACTED) if stripped.startswith('"') else _REDACTED
+    text = text[:input_budget]
     structured = _sanitize_json_string_values(text, max_length=max_length)
     if structured is not None:
         return structured
@@ -999,16 +1005,13 @@ def redact(value: Any, *, _depth: int = 0) -> Any:
         for raw_key, raw_value in value.items():
             raw_key_text = raw_key if isinstance(raw_key, str) else str(raw_key)
             key = sanitize_diagnostic(raw_key_text, max_length=_MAX_MAPPING_KEY)
-            if isinstance(raw_key, str):
-                try:
-                    canonical_secret = _canonical_json_key_is_secret(
-                        raw_key,
-                        depth=_depth,
-                    )
-                except ValueError:
-                    canonical_secret = True
-            else:
-                canonical_secret = False
+            try:
+                canonical_secret = _canonical_json_key_is_secret(
+                    raw_key_text,
+                    depth=_depth,
+                )
+            except ValueError:
+                canonical_secret = True
             value_is_secret = (
                 len(raw_key_text) > _MAX_MAPPING_KEY or _secret_key(key) or canonical_secret
             )

@@ -2255,3 +2255,297 @@ def test_native_mapping_non_string_keys_preserve_existing_coercion_policy() -> N
 
     assert visible == {"7": "visible"}
     assert secret == {"authorization": "<redacted>"}
+
+
+class _StringifiedMappingKey:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __str__(self) -> str:
+        return self.text
+
+
+_NON_STRING_MAPPING_SECRET_CASES = [
+    (
+        prefix + _compact_unicode_escape_layers(codepoint, layers) + suffix,
+        f"COERCED-{label}-DEPTH-{layers}",
+    )
+    for prefix, codepoint, suffix, label in (
+        ("Authoriz", "0061", "tion", "AUTH"),
+        ("Proxy-Authoriz", "0061", "tion", "PROXY"),
+        ("Cook", "0069", "e", "COOKIE"),
+        ("Set-Cook", "0069", "e", "SET-COOKIE"),
+    )
+    for layers in (1, 2, 6)
+]
+
+
+@pytest.mark.parametrize(("key_text", "canary"), _NON_STRING_MAPPING_SECRET_CASES)
+def test_non_string_mapping_keys_use_canonical_coerced_identity(
+    key_text: str, canary: str
+) -> None:
+    key = _StringifiedMappingKey(key_text)
+
+    cleaned = redact({key: canary, "mode": "inspect"})
+    rendered = safe_json_dumps({key: canary, "mode": "inspect"})
+    parsed = json.loads(rendered)
+
+    assert cleaned[key_text] == "<redacted>"
+    assert cleaned["mode"] == "inspect"
+    assert parsed[key_text] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+    assert canary not in rendered
+
+
+@pytest.mark.parametrize(
+    "key_text",
+    [
+        r"Authoriz\uZZZZtion",
+        "Authoriz\\",
+        "Authoriz\x00ation".replace("\\x00", "\x00"),
+        "x" * 257,
+        "Authoriz" + _compact_unicode_escape_layers("0061", 13) + "tion",
+    ],
+)
+def test_non_string_mapping_unprovable_coerced_keys_fail_closed(
+    key_text: str,
+) -> None:
+    canary = "COERCED-UNPROVABLE-KEY-CANARY"
+    key = _StringifiedMappingKey(key_text)
+
+    cleaned = redact({key: canary, "mode": "inspect"})
+    rendered = safe_json_dumps({key: canary, "mode": "inspect"})
+
+    assert canary not in cleaned.values()
+    assert canary not in rendered
+    assert "<redacted>" in cleaned.values()
+    assert cleaned["mode"] == "inspect"
+
+
+def test_non_string_safe_coerced_key_remains_visible() -> None:
+    key_text = "legal_authoriz" + _compact_unicode_escape_layers("0061", 6) + "tion_status"
+    key = _StringifiedMappingKey(key_text)
+
+    cleaned = redact({key: "visible", "mode": "inspect"})
+
+    assert cleaned == {key_text: "visible", "mode": "inspect"}
+
+
+_SECRET_BEARING_JSON_KEY_CASES = [
+    (
+        prefix + _compact_unicode_escape_layers("003a", layers) + suffix + canary,
+        canary,
+    )
+    for prefix, suffix, label in (
+        ("Authorization", " Bearer ", "AUTH-BEARER"),
+        ("Authorization", " Basic ", "AUTH-BASIC"),
+        ("Proxy-Authorization", " Digest response=", "PROXY"),
+        ("Cookie", " session=", "COOKIE"),
+        ("Set-Cookie", " session=", "SET-COOKIE"),
+    )
+    for layers in (1, 2, 6)
+    for canary in (f"KEY-TOKEN-{label}-DEPTH-{layers}",)
+]
+
+
+@pytest.mark.parametrize(("key", "canary"), _SECRET_BEARING_JSON_KEY_CASES)
+def test_secret_bearing_json_object_key_token_fails_closed(key: str, canary: str) -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostic = json.dumps({key: "ordinary", "mode": "inspect"}, separators=(",", ":"))
+    direct = sanitize_diagnostic(diagnostic)
+    nested = safe_json_dumps({"failure": {"message": diagnostic}})
+    failure = json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict())
+
+    assert direct == "<redacted>"
+    for output in (direct, nested, failure):
+        assert canary not in output
+        assert "<redacted>" in output
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        r"legal_authorization\u003a allowed",
+        r"marketing_cookie\u003a enabled",
+        r"authorization_status\u003a denied",
+        r"cookie_policy\u003a strict",
+        r"basic_settings\u003a enabled",
+    ],
+)
+def test_ordinary_json_object_key_text_boundaries_remain_visible(key: str) -> None:
+    diagnostic = json.dumps({key: "visible", "mode": "inspect"}, separators=(",", ":"))
+
+    rendered = sanitize_diagnostic(diagnostic)
+    parsed = json.loads(rendered)
+
+    assert parsed[key] == "visible"
+    assert parsed["mode"] == "inspect"
+    assert "<redacted>" not in rendered
+
+
+def _json_object_at_length(target: int, message: str, *, position: str = "start") -> str:
+    if position == "start":
+        payload = {"message": message, "padding": "", "mode": "inspect"}
+        padding_key = "padding"
+    elif position == "middle":
+        payload = {"before": "", "message": message, "after": "", "mode": "inspect"}
+        padding_key = "before"
+    elif position == "end":
+        payload = {"padding": "", "mode": "inspect", "message": message}
+        padding_key = "padding"
+    else:
+        raise AssertionError(position)
+    base = json.dumps(payload, separators=(",", ":"))
+    if len(base) > target:
+        raise AssertionError((len(base), target))
+    payload[padding_key] = "x" * (target - len(base))
+    rendered = json.dumps(payload, separators=(",", ":"))
+    assert len(rendered) == target
+    return rendered
+
+
+@pytest.mark.parametrize("position", ["start", "middle", "end"])
+def test_structured_diagnostic_budget_boundaries_never_fall_back_unstructured(
+    position: str,
+) -> None:
+    max_length = 256
+    budget = max_length * 4
+    canary = f"BUDGET-{position.upper()}-AUTH"
+    message = rf"Authorization\u003a Custom {canary}"
+
+    at_output_bound = _json_object_at_length(max_length, message, position=position)
+    at_parse_budget = _json_object_at_length(budget, message, position=position)
+    over_parse_budget = _json_object_at_length(budget + 1, message, position=position)
+
+    bounded = sanitize_diagnostic(at_output_bound, max_length=max_length)
+    at_budget = sanitize_diagnostic(at_parse_budget, max_length=max_length)
+    over_budget = sanitize_diagnostic(over_parse_budget, max_length=max_length)
+
+    assert canary not in bounded
+    assert json.loads(bounded)["mode"] == "inspect"
+    assert at_budget == "<redacted>"
+    assert over_budget == "<redacted>"
+    assert sanitize_diagnostic(over_parse_budget, max_length=max_length) == over_budget
+
+
+@pytest.mark.parametrize(
+    ("kind", "position"),
+    [
+        ("object", "start"),
+        ("object", "middle"),
+        ("object", "end"),
+        ("list", "start"),
+        ("list", "middle"),
+        ("list", "end"),
+        ("string", "start"),
+        ("nested", "middle"),
+        ("array", "end"),
+    ],
+)
+def test_very_large_structured_diagnostics_fail_closed_before_truncation(
+    kind: str, position: str
+) -> None:
+    max_length = 256
+    canary = f"LARGE-{kind.upper()}-{position.upper()}-AUTH"
+    secret = rf"Authorization\u003a Custom {canary}"
+    padding = "x" * 5000
+
+    if kind == "object":
+        items = {
+            "start": {"message": secret, "padding": padding},
+            "middle": {"before": padding, "message": secret, "after": padding},
+            "end": {"padding": padding, "message": secret},
+        }
+        diagnostic = json.dumps(items[position], separators=(",", ":"))
+        expected = "<redacted>"
+    elif kind == "list":
+        items = {
+            "start": [secret, padding, "safe"],
+            "middle": [padding, secret, padding],
+            "end": [padding, "safe", secret],
+        }
+        diagnostic = json.dumps(items[position], separators=(",", ":"))
+        expected = "<redacted>"
+    elif kind == "string":
+        diagnostic = json.dumps(secret + padding)
+        expected = json.dumps("<redacted>")
+    elif kind == "nested":
+        inner = json.dumps({"before": padding, "message": secret, "after": padding})
+        diagnostic = json.dumps({"message": inner, "mode": "inspect"}, separators=(",", ":"))
+        expected = "<redacted>"
+    elif kind == "array":
+        diagnostic = json.dumps(
+            {"items": [padding, {"message": secret}]}, separators=(",", ":")
+        )
+        expected = "<redacted>"
+    else:
+        raise AssertionError(kind)
+
+    rendered = sanitize_diagnostic(diagnostic, max_length=max_length)
+
+    assert rendered == expected
+    assert canary not in rendered
+    if kind == "string":
+        assert json.loads(rendered) == "<redacted>"
+
+
+@pytest.mark.parametrize("layers", [1, 2, 6])
+@pytest.mark.parametrize("label", ["access_token", "proof_token"])
+def test_secret_assignment_material_inside_json_key_token_fails_closed(
+    layers: int, label: str
+) -> None:
+    canary = f"KEY-TOKEN-{label.upper()}-DEPTH-{layers}"
+    key = label + _compact_unicode_escape_layers("003d", layers) + canary
+    diagnostic = json.dumps({key: "ordinary", "mode": "inspect"}, separators=(",", ":"))
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert canary not in rendered
+
+
+def test_jwt_material_inside_json_key_token_fails_closed() -> None:
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJrZXktdG9rZW4tY2FuYXJ5In0.signaturevalue"
+    diagnostic = json.dumps({f"trace {jwt}": "ordinary", "mode": "inspect"})
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert jwt not in rendered
+
+
+@pytest.mark.parametrize(
+    ("position", "message", "canary"),
+    [
+        (
+            "start",
+            r"Proxy-Authorization\u003a Digest response=OVER-PROXY-CANARY",
+            "OVER-PROXY-CANARY",
+        ),
+        (
+            "middle",
+            r"Set-Cookie\u003a session=OVER-COOKIE-CANARY",
+            "OVER-COOKIE-CANARY",
+        ),
+        (
+            "end",
+            r"access_token\u003dOVER-TOKEN-CANARY",
+            "OVER-TOKEN-CANARY",
+        ),
+        (
+            "middle",
+            r"proof_token\u003dOVER-PROOF-CANARY",
+            "OVER-PROOF-CANARY",
+        ),
+    ],
+)
+def test_over_budget_structured_families_fail_closed_before_fallback(
+    position: str, message: str, canary: str
+) -> None:
+    diagnostic = _json_object_at_length(1025, message, position=position)
+
+    rendered = sanitize_diagnostic(diagnostic, max_length=256)
+
+    assert rendered == "<redacted>"
+    assert canary not in rendered

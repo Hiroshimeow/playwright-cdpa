@@ -9,6 +9,7 @@ from playwright_gpt_core.cli import (
     EXIT_CANCELLED,
     EXIT_OWNERSHIP,
     _error_result,
+    _render,
     build_parser,
     exit_code,
     main,
@@ -1125,3 +1126,157 @@ def test_get_json_does_not_print_json_string_root_or_recursive_key_secrets(
     assert "<redacted>" in diagnostic
     assert isinstance(json.loads(diagnostic), (dict, str))
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("request_id", "key", "canary"),
+    [
+        (
+            "cli-secret-key-token-auth",
+            r"Authorization\u003a Bearer CLI-KEY-TOKEN-AUTH",
+            "CLI-KEY-TOKEN-AUTH",
+        ),
+        (
+            "cli-secret-key-token-basic",
+            r"Authorization\u003a Basic CLI-KEY-TOKEN-BASIC",
+            "CLI-KEY-TOKEN-BASIC",
+        ),
+        (
+            "cli-secret-key-token-proxy",
+            r"Proxy-Authorization\u003a Digest response=CLI-KEY-TOKEN-PROXY",
+            "CLI-KEY-TOKEN-PROXY",
+        ),
+        (
+            "cli-secret-key-token-cookie",
+            r"Cookie\u003a session=CLI-KEY-TOKEN-COOKIE",
+            "CLI-KEY-TOKEN-COOKIE",
+        ),
+        (
+            "cli-secret-key-token-set-cookie",
+            r"Set-Cookie\u003a session=CLI-KEY-TOKEN-SET-COOKIE",
+            "CLI-KEY-TOKEN-SET-COOKIE",
+        ),
+    ],
+)
+def test_get_json_does_not_print_secret_material_from_json_key_tokens(
+    tmp_path, capsys, request_id: str, key: str, canary: str
+) -> None:
+    diagnostic = json.dumps({key: "ordinary", "mode": "inspect"}, separators=(",", ":"))
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, diagnostic),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+
+    assert code == 20
+    assert canary not in captured.out
+    assert canary not in captured.err
+    assert parsed["failure"]["message"] == "<redacted>"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("position", ["start", "middle", "end"])
+def test_get_json_does_not_print_over_budget_structured_diagnostic_canary(
+    tmp_path, capsys, position: str
+) -> None:
+    canary = f"CLI-LARGE-{position.upper()}-AUTH"
+    secret = rf"Authorization\u003a Custom {canary}"
+    padding = "x" * 40000
+    if position == "start":
+        payload = {"message": secret, "padding": padding, "mode": "inspect"}
+    elif position == "middle":
+        payload = {"before": padding, "message": secret, "after": padding}
+    else:
+        payload = {"padding": padding, "mode": "inspect", "message": secret}
+    diagnostic = json.dumps(payload, separators=(",", ":"))
+    request_id = f"cli-large-{position}"
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, diagnostic),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+
+    assert code == 20
+    assert canary not in captured.out
+    assert canary not in captured.err
+    assert parsed["failure"]["message"] == "<redacted>"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("request_id", "key", "canary"),
+    [
+        (
+            "cli-secret-key-token-access",
+            r"access_token\u003dCLI-KEY-TOKEN-ACCESS",
+            "CLI-KEY-TOKEN-ACCESS",
+        ),
+        (
+            "cli-secret-key-token-proof",
+            r"proof_token\u003dCLI-KEY-TOKEN-PROOF",
+            "CLI-KEY-TOKEN-PROOF",
+        ),
+    ],
+)
+def test_get_json_does_not_print_secret_assignments_from_json_key_tokens(
+    tmp_path, capsys, request_id: str, key: str, canary: str
+) -> None:
+    diagnostic = json.dumps({key: "ordinary", "mode": "inspect"}, separators=(",", ":"))
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, diagnostic),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+
+    assert code == 20
+    assert canary not in captured.out
+    assert canary not in captured.err
+    assert parsed["failure"]["message"] == "<redacted>"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("kind", ["key-token", "over-budget"])
+def test_direct_json_renderer_never_emits_structured_diagnostic_canary(
+    capsys, kind: str
+) -> None:
+    canary = f"DIRECT-RENDER-{kind.upper()}-CANARY"
+    if kind == "key-token":
+        key = rf"Authorization\u003a Bearer {canary}"
+        diagnostic = json.dumps({key: "ordinary", "mode": "inspect"}, separators=(",", ":"))
+    else:
+        diagnostic = json.dumps(
+            {
+                "padding": "x" * 40000,
+                "message": rf"proof_token\u003d{canary}",
+            },
+            separators=(",", ":"),
+        )
+    result = Result(
+        1,
+        "direct-render",
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, diagnostic),
+    )
+
+    _render(result, json_mode=True)
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+
+    assert canary not in captured.out
+    assert captured.err == ""
+    assert parsed["failure"]["message"] == "<redacted>"
