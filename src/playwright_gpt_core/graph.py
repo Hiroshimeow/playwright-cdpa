@@ -144,6 +144,23 @@ def graph_fingerprints(conversation: dict[str, Any]) -> dict[str, str]:
     return {node_id: fingerprint_node(node) for node_id, node in mapping.items()}
 
 
+def baseline_graph_fingerprints(
+    conversation: dict[str, Any], baseline_node_ids: set[str]
+) -> dict[str, str]:
+    mapping = _mapping(conversation)
+    fingerprints: dict[str, str] = {}
+    for node_id in baseline_node_ids:
+        node = mapping.get(node_id)
+        if not isinstance(node, dict):
+            raise IdentityMissingError("pre-Send graph baseline node is missing")
+        projected = dict(node)
+        children = node.get("children")
+        if isinstance(children, list):
+            projected["children"] = [child for child in children if child in baseline_node_ids]
+        fingerprints[node_id] = fingerprint_node(projected)
+    return fingerprints
+
+
 @dataclass(frozen=True, slots=True)
 class GraphCandidate:
     message_id: str

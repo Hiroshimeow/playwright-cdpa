@@ -113,7 +113,7 @@ Logging/observation fingerprints are independent from final-candidate resolution
 ## Persistence and ownership
 
 - Repository-local turn results and deployment-wide conversation ownership are separate persistence planes.
-- Turn and conversation state use strict versioned JSON schemas. Turn schema v4 validates the exact JSON type of enums, booleans, nonnegative integers, SHA-256 values, timezone-aware timestamps, identities, failures, response metadata, and helper ownership. It also validates target/identity, response/state, failure/state, and state/provenance combinations. Schema v2/v3 migration remains supported but malformed legacy values are rejected rather than coerced.
+- Turn and conversation state use strict versioned JSON schemas. Turn schema v4 validates the exact JSON type of enums, booleans, nonnegative integers, SHA-256 values, timezone-aware timestamps, identities, failures, response metadata, and helper ownership. Nested identity objects must contain exactly the supported current fields after explicit migration; unknown or missing fields are rejected and the raw record remains unchanged. It also validates target/identity, response/state, failure/state, and state/provenance combinations. Schema v2/v3 migration remains supported but malformed legacy values are rejected rather than coerced.
 - All persisted identity and correlation fields are decoded as exact bounded strings. Objects, arrays, booleans, numbers, null where disallowed, whitespace-only values, and control characters are rejected rather than stringified.
 - Writes use a temporary file in the same directory, file `fsync`, `os.replace`, then parent-directory `fsync`.
 - Turn and conversation records carry monotonically increasing revisions. A public request ID is create-only and can never overwrite an existing record. Every turn load binds three identities before returning: requested ID, filename stem, and embedded `request_id`; any mismatch is preserved as corrupt state and no browser or ownership mutation follows.
@@ -138,11 +138,12 @@ Recovery is allowed only when all of these hold:
 - state is retry-prohibited after the click boundary;
 - the durable conversation claim still names the exact request;
 - a pre-Send current-node anchor exists;
-- a complete pre-Send graph baseline exists;
+- a complete pre-Send graph baseline exists and every persisted fingerprint is an exact lowercase SHA-256 digest;
+- every baseline node remains present and its raw allowlisted projection matches the persisted digest; newly added non-baseline children are excluded from that comparison because a legitimate Send must append a child to the anchor;
 - exactly one new current-branch user node appears below that anchor;
 - that node carries canonical graph correlation.
 
-No prompt-text fallback is used. Zero or multiple candidates remain `UNKNOWN` and block reuse.
+No prompt-text fallback is used. A missing, reparented, content-changing, metadata-changing, or otherwise fingerprint-changing baseline fails as an ambiguous outcome before identity, state, helper lifecycle, or shared ownership is changed. Zero or multiple candidates remain `UNKNOWN` and block reuse.
 
 ### Fresh click with no conversation identity
 
@@ -160,8 +161,8 @@ Serialization is allowlist-first and recursively redacts:
 - access/refresh/resume/session tokens;
 - Sentinel, Turnstile, and proof material;
 - JWT-like strings;
-- passwords, secrets, and API keys;
-- credential-bearing URL userinfo, sensitive query parameters, fragments, and secret-bearing path segments. Secret labels are normalized across snake_case, kebab-case, camelCase, and compact forms. The shared predicate covers generic `*_token`, `*_secret`, `*_password`, `*_passwd`, `*_api_key`, `*_credential`, and `*_credentials` families plus bounded private/signing-key forms, as well as known access/refresh/resume/session/proof/Sentinel/Turnstile labels. A credential marker joined to payload in one path segment causes the whole segment and following path context to be redacted; explicit documentation/resource suffixes and ordinary near-matches remain visible. Free-form unquoted assignment values stop at query delimiters, so sanitizing one secret query parameter does not discard later redacted or nonsecret parameters.
+- passwords, passphrases, secrets, API keys, canonical secret-access-key labels, and encryption keys;
+- credential-bearing URL userinfo, sensitive query parameters, fragments, and secret-bearing path segments. Secret labels are normalized across snake_case, kebab-case, camelCase, and compact forms. The shared predicate covers generic `*_token`, `*_secret`, `*_password`, `*_passwd`, `*_api_key`, `*_credential`, and `*_credentials` families plus bounded private/signing/encryption-key, secret-access-key, and passphrase forms, as well as known access/refresh/resume/session/proof/Sentinel/Turnstile labels. A credential marker joined to payload in one path segment causes the whole segment and following path context to be redacted; explicit documentation/resource suffixes and ordinary near-matches remain visible. Free-form unquoted assignment values stop at query delimiters, so sanitizing one secret query parameter does not discard later redacted or nonsecret parameters.
 
 Free-form exception and diagnostic strings pass through the same bounded sanitizer. Unexpected exceptions expose only the exception type at the public boundary. Corrupt-state diagnostics identify the record and parser exception type without preserving or chaining raw parser text.
 

@@ -43,7 +43,7 @@ def test_exact_user_node_is_discovered_from_current_branch_and_baseline() -> Non
             request_id="req-1",
             pre_send_current_node="root",
         ),
-        baseline_node_ids={"root"},
+        baseline_node_fingerprints={},
         prompt="prompt",
     )
     assert identity.user_message_id == "user-1"
@@ -61,6 +61,6 @@ def test_ambiguous_user_candidates_fail_closed() -> None:
         discover_user_identity(
             snapshot,
             TurnIdentity(turn_exchange_id="turn-1", request_id="req-1"),
-            baseline_node_ids={"root"},
+            baseline_node_fingerprints={},
             prompt="prompt",
         )

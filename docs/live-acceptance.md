@@ -710,3 +710,91 @@ Python 3.14.0:  256 passed, 5 xfailed
 ```
 
 The five xfails remain immutable prototype characterization tests. Product runtime and existing limitations are unchanged.
+
+## Replacement DEV turn 7 — baseline, nested-state, and secret remediation
+
+Date: 2026-07-26
+
+### Uncertain structural recovery
+
+Persisted baseline fingerprints are now operational proof rather than an ID-only set. The decoder requires lowercase SHA-256 digests. Before binding a graph-delta user, recovery recomputes every baseline node from exact allowlisted raw material.
+
+The projection retains parent, original baseline children, author, recipient, status, content, and selected metadata. It excludes only children added outside the original baseline, because a valid Send necessarily appends a new user child to the pre-Send anchor.
+
+Focused results:
+
+```text
+unchanged baseline plus one new user child: accepted
+same-ID baseline content change: rejected
+missing baseline node: rejected
+missing durable anchor fingerprint: rejected
+malformed fingerprint: corrupt_state
+identity after rejection: unbound
+state after rejection: UNKNOWN
+shared owner and revision after rejection: unchanged
+```
+
+### Exact nested identity schema
+
+The current persisted identity object requires every supported field and rejects every unsupported field after explicit legacy migration. Direct store, CLI, and service regressions prove a poisoned nested identity:
+
+```text
+returns corrupt_state
+keeps the original file byte-for-byte
+constructs no BrowserSession
+changes no helper lifecycle
+changes no shared ownership record
+```
+
+### Cloud and encryption secret grammar
+
+The shared normalized predicate now covers:
+
+```text
+canonical secret-access-key labels
+encryption-key labels
+passphrase labels
+qualified snake, kebab, camel, and compact forms
+```
+
+The same predicate is exercised by assignments, mappings, query keys, compound paths, nested diagnostics, `Failure`, atomic state writes, and CLI JSON. Explicit guide/help/format paths remain diagnostic context.
+
+A generated adversarial corpus reported:
+
+```text
+diagnostic values removed: true
+structured values removed: true
+Failure values removed: true
+state values removed: true
+state remains valid JSON: true
+nested identity poison rejected: true
+nested identity poison byte-preserved: true
+baseline drift rejected: true
+identity remained unbound: true
+state remained UNKNOWN: true
+shared owner remained unchanged: true
+evidence-tree secret scan: pass
+```
+
+### Exact persisted rewatch
+
+```text
+CDP /json/version HTTP: 200
+request: 3c2de378…2dd0
+exit: 0
+state: COMPLETE
+response: DEV3_OK
+stderr: 0 bytes
+```
+
+No new frontend Send was issued.
+
+### Automated evidence
+
+```text
+Python 3.11.15: 295 passed, 5 xfailed
+Python 3.12.13: 295 passed, 5 xfailed
+Python 3.14.0:  295 passed, 5 xfailed
+```
+
+The five xfails remain immutable prototype characterization tests. Existing hard-cancellation and external-schema limitations are unchanged.

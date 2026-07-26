@@ -86,3 +86,20 @@ def test_persisted_identity_sources_require_string_keys_and_values() -> None:
 
     with pytest.raises(ValueError, match="identity source"):
         TurnIdentity.from_dict(payload)
+
+
+@pytest.mark.parametrize("missing", ["conversation_id", "sources"])
+def test_persisted_identity_requires_exact_field_set(missing: str) -> None:
+    payload = TurnIdentity(conversation_id="conversation-1").to_dict()
+    payload.pop(missing)
+
+    with pytest.raises(ValueError, match="identity"):
+        TurnIdentity.from_dict(payload)
+
+
+def test_persisted_identity_rejects_unsupported_fields() -> None:
+    payload = TurnIdentity(conversation_id="conversation-1").to_dict()
+    payload["unexpected_runtime_pointer"] = "foreign-id"
+
+    with pytest.raises(ValueError, match="unsupported"):
+        TurnIdentity.from_dict(payload)

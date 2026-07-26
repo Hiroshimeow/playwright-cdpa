@@ -12,15 +12,22 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_LABEL = re.compile(r"[^a-z0-9]+")
 _KNOWN_SECRET_LABELS = {
     "authorization",
+    "aws_secret_access_key",
+    "awssecretaccesskey",
     "cookie",
     "cookies",
     "credential",
+    "encryption_key",
+    "encryptionkey",
     "credentials",
     "password",
+    "passphrase",
     "passwd",
     "private_key",
     "privatekey",
     "secret",
+    "secret_access_key",
+    "secretaccesskey",
     "api_key",
     "apikey",
     "access_token",
@@ -98,6 +105,9 @@ def _secret_key(key: str) -> bool:
     if normalized.endswith(
         (
             "_secret",
+            "_secret_access_key",
+            "_encryption_key",
+            "_passphrase",
             "_password",
             "_passwd",
             "_api_key",
@@ -111,6 +121,9 @@ def _secret_key(key: str) -> bool:
     if compact.endswith(
         (
             "secret",
+            "secretaccesskey",
+            "encryptionkey",
+            "passphrase",
             "password",
             "passwd",
             "apikey",
@@ -139,6 +152,13 @@ def _path_secret_marker_with_payload(segment: str) -> bool:
             boundaries.add(index)
         elif character.isupper() and (previous.islower() or previous.isdigit()):
             boundaries.add(index)
+
+    for index in sorted(boundaries, reverse=True):
+        marker = segment[:index].rstrip(_PATH_SEPARATORS)
+        payload = segment[index:].lstrip(_PATH_SEPARATORS)
+        payload_label, _payload_compact = _normalize_secret_label(payload)
+        if payload_label in _PATH_PUBLIC_CONTEXTS and _path_secret_marker(marker):
+            return False
 
     for index in sorted(boundaries):
         marker = segment[:index].rstrip(_PATH_SEPARATORS)

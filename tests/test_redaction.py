@@ -310,3 +310,85 @@ def test_nested_diagnostic_sanitizes_common_credentials_and_private_keys() -> No
     assert "NESTED-CREDENTIALS-VALUE" not in rendered
     assert "NESTED-PRIVATE-KEY-VALUE" not in rendered
     assert "<redacted>" in rendered
+
+
+@pytest.mark.parametrize(
+    ("label", "secret"),
+    [
+        ("aws_secret_access_key", "AWS-SECRET-ACCESS-VALUE"),
+        ("aws-secret-access-key", "AWS-SECRET-ACCESS-VALUE"),
+        ("awsSecretAccessKey", "AWS-SECRET-ACCESS-VALUE"),
+        ("awssecretaccesskey", "AWS-SECRET-ACCESS-VALUE"),
+        ("secret_access_key", "SECRET-ACCESS-VALUE"),
+        ("secretAccessKey", "SECRET-ACCESS-VALUE"),
+        ("encryption_key", "ENCRYPTION-KEY-VALUE"),
+        ("encryptionKey", "ENCRYPTION-KEY-VALUE"),
+        ("passphrase", "PASSPHRASE-VALUE"),
+        ("sshPassphrase", "PASSPHRASE-VALUE"),
+    ],
+)
+def test_cloud_and_encryption_secret_assignments_are_sanitized(label: str, secret: str) -> None:
+    rendered = sanitize_diagnostic(f"operation failed: {label}={secret}; retry later")
+
+    assert secret not in rendered
+    assert "<redacted>" in rendered
+    assert "retry later" in rendered
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["aws_secret_access_key", "secretAccessKey", "encryption_key", "sshPassphrase"],
+)
+def test_cloud_and_encryption_structured_values_are_sanitized(label: str) -> None:
+    rendered = safe_json_dumps({"outer": {label: "STRUCTURED-SECRET-VALUE"}})
+
+    assert "STRUCTURED-SECRET-VALUE" not in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        "aws_secret_access_key-PATH-SECRET-VALUE",
+        "awsSecretAccessKeyPATHSECRETVALUE",
+        "secret-access-key-PATH-SECRET-VALUE",
+        "encryptionKeyPATHSECRETVALUE",
+        "passphrase-PATH-SECRET-VALUE",
+    ],
+)
+def test_cloud_and_encryption_secret_path_payloads_are_sanitized(segment: str) -> None:
+    rendered = sanitize_diagnostic(f"GET https://example.test/api/{segment}/tail failed")
+
+    assert "SECRET-VALUE" not in rendered
+    assert "SECRETVALUE" not in rendered
+    assert "tail" not in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.parametrize(
+    "segment",
+    ["secret-access-key-guide", "encryption-key-format", "passphrase-help"],
+)
+def test_cloud_and_encryption_documentation_paths_remain_visible(segment: str) -> None:
+    rendered = sanitize_diagnostic(f"GET https://example.test/api/{segment} failed")
+
+    assert segment in rendered
+    assert "<redacted>" not in rendered
+
+
+def test_cloud_and_encryption_query_failure_and_nested_diagnostics_are_sanitized() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    query_diagnostic = (
+        "GET https://example.test/callback?"
+        "awsSecretAccessKey=QUERY-SECRET-VALUE&mode=inspect failed"
+    )
+    failure_diagnostic = "passphrase=PASS-SECRET-VALUE"
+    rendered = safe_json_dumps({"failure": {"message": query_diagnostic}})
+    failure = json.dumps(Failure(FailureCategory.INVARIANT, failure_diagnostic).to_dict())
+
+    assert "QUERY-SECRET-VALUE" not in rendered
+    assert "mode=inspect" in rendered
+    assert "PASS-SECRET-VALUE" not in failure
+    for output in (rendered, failure):
+        assert "<redacted>" in output

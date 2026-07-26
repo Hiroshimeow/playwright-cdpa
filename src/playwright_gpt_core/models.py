@@ -230,6 +230,13 @@ class TurnIdentity:
             "parent_message_id",
             "pre_send_current_node",
         )
+        expected_fields = set(names) | {"sources"}
+        unknown = set(value) - expected_fields
+        if unknown:
+            raise ValueError(f"identity contains unsupported fields: {sorted(unknown)!r}")
+        missing = expected_fields - set(value)
+        if missing:
+            raise ValueError(f"identity is missing fields: {sorted(missing)!r}")
         fields: dict[str, Any] = {
             name: decode_optional_identifier(value.get(name), f"identity.{name}")
             for name in names
@@ -360,9 +367,15 @@ class TurnRecord:
         return replace(self, identity=identity, updated_at=utc_now())
 
     def with_baseline(self, fingerprints: dict[str, str]) -> TurnRecord:
+        baseline: dict[str, str] = {}
+        for raw_node_id, raw_fingerprint in fingerprints.items():
+            node_id = decode_identifier(raw_node_id, "baseline node id")
+            fingerprint = decode_sha256(raw_fingerprint, "baseline fingerprint")
+            assert node_id is not None and fingerprint is not None
+            baseline[node_id] = fingerprint
         return replace(
             self,
-            baseline_node_fingerprints=dict(fingerprints),
+            baseline_node_fingerprints=baseline,
             updated_at=utc_now(),
         )
 
@@ -488,9 +501,7 @@ class TurnRecord:
         baseline: dict[str, str] = {}
         for raw_key, raw_fingerprint in raw_baseline.items():
             key = decode_identifier(raw_key, "baseline node id")
-            fingerprint = decode_identifier(
-                raw_fingerprint, "baseline fingerprint", max_length=128
-            )
+            fingerprint = decode_sha256(raw_fingerprint, "baseline fingerprint")
             assert key is not None and fingerprint is not None
             baseline[key] = fingerprint
 

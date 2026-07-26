@@ -5,7 +5,7 @@ import json
 import pytest
 
 from playwright_gpt_core.errors import CorruptStateError, Failure, FailureCategory
-from playwright_gpt_core.models import TurnRecord, TurnState
+from playwright_gpt_core.models import TurnIdentity, TurnRecord, TurnState
 from playwright_gpt_core.storage import StateStore
 
 
@@ -362,5 +362,54 @@ def test_state_write_sanitizes_common_credentials_and_private_keys(tmp_path) -> 
     assert "STATE-CREDENTIALS-VALUE" not in raw
     assert "STATE-PRIVATE-KEY-VALUE" not in raw
     assert "STATE-SIGNING-PATH-VALUE" not in raw
+    assert "<redacted>" in raw
+    assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize("fingerprint", ["not-a-sha256", "A" * 64, "a" * 63])
+def test_baseline_fingerprint_requires_exact_lowercase_sha256(
+    tmp_path, fingerprint: str
+) -> None:
+    store = StateStore(tmp_path)
+    value = TurnRecord.new(request_id="strict-baseline-sha", prompt="prompt").to_dict()
+    value["baseline_node_fingerprints"] = {"root": fingerprint}
+    raw = _write_turn_payload(store, "strict-baseline-sha", value)
+
+    with pytest.raises(CorruptStateError):
+        store.load("strict-baseline-sha")
+
+    assert store.turn_path("strict-baseline-sha").read_text(encoding="utf-8") == raw
+
+
+def test_unknown_nested_identity_field_is_rejected_and_preserved(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    value = TurnRecord.new(request_id="unknown-identity-field", prompt="prompt").to_dict()
+    value["identity"] = TurnIdentity(conversation_id="conversation-1").to_dict()
+    value["identity"]["unexpected_runtime_pointer"] = "foreign-id"
+    raw = _write_turn_payload(store, "unknown-identity-field", value)
+
+    with pytest.raises(CorruptStateError):
+        store.load("unknown-identity-field")
+
+    assert store.turn_path("unknown-identity-field").read_text(encoding="utf-8") == raw
+
+
+def test_state_write_sanitizes_cloud_and_encryption_secrets(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    message = (
+        "aws_secret_access_key=STATE-AWS-SECRET; "
+        "encryption_key=STATE-ENCRYPTION-SECRET; passphrase=STATE-PASSPHRASE-SECRET"
+    )
+    record = TurnRecord.new(request_id="cloud-encryption-secret", prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    assert "STATE-AWS-SECRET" not in raw
+    assert "STATE-ENCRYPTION-SECRET" not in raw
+    assert "STATE-PASSPHRASE-SECRET" not in raw
     assert "<redacted>" in raw
     assert isinstance(json.loads(raw), dict)

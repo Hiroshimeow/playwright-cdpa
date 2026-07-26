@@ -12,7 +12,7 @@ from playwright_gpt_core.cli import (
     main,
 )
 from playwright_gpt_core.errors import Failure, FailureCategory
-from playwright_gpt_core.models import Result, TurnRecord, TurnState
+from playwright_gpt_core.models import Result, TurnIdentity, TurnRecord, TurnState
 from playwright_gpt_core.storage import StateStore
 
 
@@ -244,3 +244,46 @@ def test_get_json_does_not_print_common_credentials_or_private_keys(tmp_path, ca
     assert "<redacted>" in captured.out
     assert captured.err == ""
     assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+def test_get_json_does_not_print_cloud_or_encryption_secrets(tmp_path, capsys) -> None:
+    store = StateStore(tmp_path)
+    message = (
+        "aws_secret_access_key=CLI-AWS-SECRET; "
+        "encryption_key=CLI-ENCRYPTION-SECRET; passphrase=CLI-PASSPHRASE-SECRET"
+    )
+    record = TurnRecord.new(request_id="cli-cloud-secret", prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", record.request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    assert "CLI-AWS-SECRET" not in captured.out
+    assert "CLI-ENCRYPTION-SECRET" not in captured.out
+    assert "CLI-PASSPHRASE-SECRET" not in captured.out
+    assert "<redacted>" in captured.out
+    assert captured.err == ""
+
+
+def test_get_rejects_unknown_nested_identity_field_without_rewriting(tmp_path, capsys) -> None:
+    store = StateStore(tmp_path)
+    value = TurnRecord.new(request_id="cli-unknown-identity", prompt="prompt").to_dict()
+    value["identity"] = TurnIdentity(conversation_id="conversation-1").to_dict()
+    value["identity"]["unexpected_runtime_pointer"] = "foreign-id"
+    path = store.turn_path("cli-unknown-identity")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(value, sort_keys=True) + "\n"
+    path.write_text(raw, encoding="utf-8")
+
+    code = main(["get", "cli-unknown-identity", "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+
+    assert code == 20
+    assert result["failure"]["category"] == "corrupt_state"
+    assert path.read_text(encoding="utf-8") == raw
+    assert captured.err == ""

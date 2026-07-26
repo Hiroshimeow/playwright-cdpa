@@ -700,7 +700,7 @@ class ChatGPTCore:
             identity = discover_user_identity(
                 snapshot.graph,
                 identity,
-                baseline_node_ids=set(current.baseline_node_fingerprints),
+                baseline_node_fingerprints=current.baseline_node_fingerprints,
                 prompt=None,
             )
             current = self.store.save(
@@ -727,7 +727,7 @@ class ChatGPTCore:
         if identity.conversation_id is None:
             raise IdentityMissingError("conversation_id is required for user binding")
         deadline = time.monotonic() + self.config.identity_timeout
-        baseline_ids = set(record.baseline_node_fingerprints)
+        baseline_fingerprints = record.baseline_node_fingerprints
         last_error: CoreError | None = None
         while time.monotonic() < deadline:
             snapshot = await backend.snapshot(identity.conversation_id)
@@ -736,7 +736,7 @@ class ChatGPTCore:
                     return discover_user_identity(
                         snapshot.graph,
                         identity,
-                        baseline_node_ids=baseline_ids,
+                        baseline_node_fingerprints=baseline_fingerprints,
                         prompt=prompt,
                     )
                 except CoreError as exc:

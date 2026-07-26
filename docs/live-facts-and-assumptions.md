@@ -122,3 +122,14 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - The exact immutable prototype checksum remains the only allowed full-length hexadecimal value; a one-character-altered checksum is rejected.
 - The documentation-focused suite now contains 12 passing tests, and the full suite passes with `256 passed, 5 xfailed` on Python 3.11, 3.12, and 3.14.
 - Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes after this test-only correction.
+
+## Replacement DEV turn 7 recovery and secret-boundary facts — July 26, 2026
+
+- Existing-conversation uncertain recovery now consumes the complete persisted baseline fingerprint map. Each value must be an exact lowercase SHA-256 digest.
+- Recovery compares a raw allowlisted projection of every baseline node. Newly appended non-baseline children are filtered from the projection so a legitimate Send can add its user node, while content, metadata, status, parent, original-child, or missing-node drift fails closed.
+- Changed and missing baseline regressions leave the request `UNKNOWN`, keep `RETRY_PROHIBITED`, bind no user identity, preserve helper state, and retain the same shared owner revision.
+- Persisted identity objects require the exact supported field set after explicit schema migration. Unknown or missing nested fields fail as `corrupt_state`; direct store, CLI, and `watch`/`recover`/`cancel` proofs preserve raw bytes and avoid browser or ownership mutation.
+- The shared secret predicate now covers canonical secret-access-key, encryption-key, and passphrase families across snake_case, kebab-case, camelCase, and compact forms. The same boundary is tested for diagnostics, mappings, query/path contexts, `Failure`, durable state, and CLI JSON, while explicit documentation/help/format path contexts remain visible.
+- An adversarial local corpus confirmed secret values absent from diagnostics, structured JSON, failures, state, CLI-visible surfaces, and the evidence tree. State remained valid JSON.
+- Full suites pass on Python 3.11, 3.12, and 3.14 with `295 passed, 5 xfailed`.
+- Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes without a new Send.

@@ -899,3 +899,49 @@ async def test_cancel_raw_secret_mutation_requires_fresh_consecutive_samples(tmp
     assert third is not None
     assert third.response == "proof_token=SECOND-SECRET"
     assert core.coordination.load(conversation_id).active_request_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["watch", "recover", "cancel"])
+async def test_unknown_nested_identity_field_fails_before_browser_or_claim_mutation(
+    tmp_path, monkeypatch, operation: str
+) -> None:
+    import json
+
+    import playwright_gpt_core.service as service_module
+    from playwright_gpt_core.errors import CorruptStateError
+    from playwright_gpt_core.models import TurnIdentity
+
+    conversation_id = "unknown-identity-conversation"
+    request_id = "unknown-identity-request"
+    core = ChatGPTCore(
+        CoreConfig(
+            state_dir=tmp_path / "state",
+            coordination_dir=tmp_path / "coordination",
+            deployment_id="unknown-identity-test",
+        )
+    )
+    value = TurnRecord.new(
+        request_id=request_id,
+        prompt="prompt",
+        target_kind="conversation",
+        target_conversation_id=conversation_id,
+    ).to_dict()
+    value["identity"] = TurnIdentity(conversation_id=conversation_id).to_dict()
+    value["identity"]["unexpected_runtime_pointer"] = "foreign-id"
+    path = core.store.turn_path(request_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(value, sort_keys=True) + "\n"
+    path.write_text(raw, encoding="utf-8")
+    claim = core.coordination.claim(conversation_id, request_id)
+    _ForbiddenBrowserSession.entered = False
+    monkeypatch.setattr(service_module, "BrowserSession", _ForbiddenBrowserSession)
+
+    with pytest.raises(CorruptStateError):
+        await getattr(core, operation)(request_id)
+
+    assert _ForbiddenBrowserSession.entered is False
+    assert path.read_text(encoding="utf-8") == raw
+    unchanged = core.coordination.load(conversation_id)
+    assert unchanged.active_request_id == request_id
+    assert unchanged.revision == claim.revision

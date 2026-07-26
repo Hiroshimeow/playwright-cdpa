@@ -4,11 +4,12 @@ from typing import Any
 
 from .errors import (
     AmbiguousIdentityError,
+    AmbiguousOutcomeError,
     ConflictingIdentityError,
     IdentityMissingError,
     SchemaDriftError,
 )
-from .graph import content_text
+from .graph import baseline_graph_fingerprints, content_text
 from .models import TurnIdentity
 from .schema import decode_identifier, decode_optional_identifier
 
@@ -56,9 +57,29 @@ def discover_user_identity(
     graph: dict[str, Any],
     identity: TurnIdentity,
     *,
-    baseline_node_ids: set[str],
+    baseline_node_fingerprints: dict[str, str],
     prompt: str | None = None,
 ) -> TurnIdentity:
+    baseline_node_ids = set(baseline_node_fingerprints)
+    if baseline_node_ids:
+        if (
+            identity.pre_send_current_node is not None
+            and identity.pre_send_current_node not in baseline_node_ids
+        ):
+            raise AmbiguousOutcomeError(
+                "persisted pre-Send graph baseline lacks the durable anchor fingerprint"
+            )
+        try:
+            current_baseline = baseline_graph_fingerprints(graph, baseline_node_ids)
+        except IdentityMissingError as exc:
+            raise AmbiguousOutcomeError(
+                "pre-Send graph baseline changed; structural recovery is unsafe"
+            ) from exc
+        if current_baseline != baseline_node_fingerprints:
+            raise AmbiguousOutcomeError(
+                "pre-Send graph baseline changed; structural recovery is unsafe"
+            )
+
     mapping = graph.get("mapping")
     if not isinstance(mapping, dict):
         raise SchemaDriftError("graph mapping must be an object")

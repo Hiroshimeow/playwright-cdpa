@@ -13,8 +13,17 @@ from tests.fixtures.graph_factory import graph, message
 def test_transport_and_graph_turn_namespaces_may_differ() -> None:
     snapshot = graph(
         message("root", "system", None, turn=None, request=None),
-        message("user-1", "user", "root", text="prompt", turn="graph-turn", request="graph-request"),
-        message("assistant-1", "assistant", "user-1", text="OK", turn="graph-turn", request="graph-request"),
+        message(
+            "user-1", "user", "root", text="prompt", turn="graph-turn", request="graph-request"
+        ),
+        message(
+            "assistant-1",
+            "assistant",
+            "user-1",
+            text="OK",
+            turn="graph-turn",
+            request="graph-request",
+        ),
         current="assistant-1",
     )
     result = discover_user_identity(
@@ -26,7 +35,7 @@ def test_transport_and_graph_turn_namespaces_may_differ() -> None:
             user_message_id="user-1",
             frontend_parent_message_id="client-created-root",
         ),
-        baseline_node_ids=set(),
+        baseline_node_fingerprints={},
     )
     assert result.transport_turn_exchange_id == "transport-turn"
     assert result.turn_exchange_id == "graph-turn"
@@ -49,7 +58,7 @@ def test_existing_conversation_pre_send_graph_anchor_is_enforced() -> None:
                 user_message_id="user-1",
                 pre_send_current_node="different-parent",
             ),
-            baseline_node_ids=set(),
+            baseline_node_fingerprints={},
         )
 
 
