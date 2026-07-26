@@ -633,3 +633,80 @@ Python 3.14.0:  245 passed, 5 xfailed
 ```
 
 The five xfails remain immutable prototype characterization tests. Existing runtime limitations are unchanged.
+
+## Replacement DEV turn 6 — version-agnostic publication gate
+
+Date: 2026-07-26
+
+### Gate correction
+
+The dashed identifier detector previously constrained UUID version and variant nibbles. That was inappropriate for publication minimization because the contract concerns full identifier shape, not semantic UUID validity.
+
+The detector now rejects every complete hexadecimal dashed shape with group lengths:
+
+```text
+8-4-4-4-12
+```
+
+No version or variant nibble is privileged.
+
+### Direct corpus
+
+The focused tests prove rejection of:
+
+```text
+version-4-shaped dashed identifier
+version-6-shaped dashed identifier
+version-7-shaped dashed identifier
+nil-shaped dashed identifier
+uppercase dashed identifier
+32-character contiguous hexadecimal identifier
+```
+
+Negative controls prove acceptance of:
+
+```text
+Unicode-ellipsis prefix/suffix form
+ASCII-ellipsis prefix/suffix form
+truncated coordination namespace
+short request prefix label
+```
+
+The exact checksum declared in `reference/SHA256SUMS` is allowed. A checksum of the same length with one changed character is rejected.
+
+### TDD evidence
+
+Before the detector correction, the added corpus failed exactly three cases:
+
+```text
+version-6-shaped
+version-7-shaped
+nil-shaped
+```
+
+After switching to the version-agnostic shape expression:
+
+```text
+tests/test_documentation.py: 12 passed
+```
+
+### Exact persisted rewatch
+
+```text
+CDP /json/version HTTP: 200
+request: 3c2de378…2dd0
+exit: 0
+state: COMPLETE
+response: DEV3_OK
+stderr: 0 bytes
+```
+
+### Automated evidence
+
+```text
+Python 3.11.15: 256 passed, 5 xfailed
+Python 3.12.13: 256 passed, 5 xfailed
+Python 3.14.0:  256 passed, 5 xfailed
+```
+
+The five xfails remain immutable prototype characterization tests. Product runtime and existing limitations are unchanged.

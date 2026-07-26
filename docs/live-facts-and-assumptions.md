@@ -113,3 +113,12 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 - The documentation gate initially reproduced seven findings and now passes with zero findings.
 - Full suites pass on Python 3.11, 3.12, and 3.14 with `245 passed, 5 xfailed`.
 - Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes after the documentation-only change.
+
+## Replacement DEV turn 6 version-agnostic identifier-gate facts — July 26, 2026
+
+- The documentation UUID detector now checks the complete dashed `8-4-4-4-12` hexadecimal shape without restricting version or variant nibbles.
+- Direct regressions cover version-4-shaped, version-6-shaped, version-7-shaped, nil-shaped, uppercase dashed identifiers, and 32-character contiguous hexadecimal identifiers.
+- Negative controls confirm truncated prefix/suffix forms remain allowed.
+- The exact immutable prototype checksum remains the only allowed full-length hexadecimal value; a one-character-altered checksum is rejected.
+- The documentation-focused suite now contains 12 passing tests, and the full suite passes with `256 passed, 5 xfailed` on Python 3.11, 3.12, and 3.14.
+- Existing exact request `3c2de378…2dd0` rewatched through CDP 9222 with exit 0, exact response `DEV3_OK`, and zero stderr bytes after this test-only correction.
