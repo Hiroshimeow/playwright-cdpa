@@ -505,3 +505,108 @@ def test_get_json_does_not_print_structured_or_quoted_proxy_authorization_values
     assert "inspect" in captured.out
     assert captured.err == ""
     assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+_AUTHORIZATION_SUFFIX_WORDS_TURN13 = (
+    "retry",
+    "failed",
+    "failure",
+    "error",
+    "status",
+    "reason",
+    "request",
+    "operation",
+)
+
+
+@pytest.mark.parametrize("header", ["Authorization", "Proxy-Authorization"])
+@pytest.mark.parametrize("suffix_word", _AUTHORIZATION_SUFFIX_WORDS_TURN13)
+def test_get_json_does_not_print_authorization_suffix_parameters(
+    tmp_path, capsys, header: str, suffix_word: str
+) -> None:
+    canary = f"CLI-AUTH-{suffix_word.upper()}-TAIL"
+    message = (
+        f"{header}: CustomScheme CLI-AUTH-PRIMARY; {suffix_word}={canary}\nnext diagnostic line"
+    )
+    store = StateStore(tmp_path)
+    request_id = f"cli-auth-suffix-{header.lower()}-{suffix_word}"
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    assert "CLI-AUTH-PRIMARY" not in captured.out
+    assert canary not in captured.out
+    assert canary not in captured.err
+    assert "next diagnostic line" in captured.out
+    assert "<redacted>" in captured.out
+    assert captured.err == ""
+    assert json.loads(captured.out)["failure"]["category"] == "invariant"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-set-cookie-json",
+            '{"Set-Cookie":"session=CLI-SET-COOKIE; HttpOnly","mode":"inspect"}',
+            ("CLI-SET-COOKIE",),
+        ),
+        (
+            "cli-set-cookie-python",
+            "{'setCookie':'session=CLI-SET-COOKIE-CAMEL; Secure','mode':'inspect'}",
+            ("CLI-SET-COOKIE-CAMEL",),
+        ),
+        (
+            "cli-qualified-set-cookie",
+            '{"headers.set_cookie":"session=CLI-QUALIFIED-COOKIE; Path=/","mode":"inspect"}',
+            ("CLI-QUALIFIED-COOKIE",),
+        ),
+        (
+            "cli-qualified-authorization",
+            '{"headers.authorization":"Digest response=CLI-QUALIFIED-AUTH","mode":"inspect"}',
+            ("CLI-QUALIFIED-AUTH",),
+        ),
+        (
+            "cli-qualified-proxy-authorization",
+            "{'headers.proxyAuthorization':'Custom CLI-QUALIFIED-PROXY-AUTH','mode':'inspect'}",
+            ("CLI-QUALIFIED-PROXY-AUTH",),
+        ),
+        (
+            "cli-compact-authorization",
+            '{"headersauthorization":"Basic CLI-COMPACT-AUTH","mode":"inspect"}',
+            ("CLI-COMPACT-AUTH",),
+        ),
+        (
+            "cli-compact-set-cookie",
+            "{'headerssetcookie':'session=CLI-COMPACT-COOKIE; Secure','mode':'inspect'}",
+            ("CLI-COMPACT-COOKIE",),
+        ),
+    ],
+)
+def test_get_json_does_not_print_cookie_or_qualified_authorization_values(
+    tmp_path, capsys, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 20
+    for secret in forbidden:
+        assert secret not in captured.out
+        assert secret not in captured.err
+    assert "<redacted>" in captured.out
+    assert "inspect" in captured.out
+    assert captured.err == ""
+    assert json.loads(captured.out)["failure"]["category"] == "invariant"

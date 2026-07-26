@@ -607,3 +607,103 @@ def test_state_write_sanitizes_structured_and_quoted_proxy_authorization_values(
     assert "<redacted>" in raw
     assert "inspect" in raw
     assert isinstance(json.loads(raw), dict)
+
+
+_AUTHORIZATION_SUFFIX_WORDS_TURN13 = (
+    "retry",
+    "failed",
+    "failure",
+    "error",
+    "status",
+    "reason",
+    "request",
+    "operation",
+)
+
+
+@pytest.mark.parametrize("header", ["Authorization", "Proxy-Authorization"])
+@pytest.mark.parametrize("suffix_word", _AUTHORIZATION_SUFFIX_WORDS_TURN13)
+def test_state_write_redacts_complete_authorization_line_with_suffix_parameter(
+    tmp_path, header: str, suffix_word: str
+) -> None:
+    canary = f"STATE-AUTH-{suffix_word.upper()}-TAIL"
+    message = (
+        f"{header}: CustomScheme STATE-AUTH-PRIMARY; {suffix_word}={canary}"
+        "\nnext diagnostic line"
+    )
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(
+        request_id=f"state-auth-suffix-{header.lower()}-{suffix_word}", prompt="prompt"
+    ).transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    assert "STATE-AUTH-PRIMARY" not in raw
+    assert canary not in raw
+    assert "next diagnostic line" in raw
+    assert "<redacted>" in raw
+    assert isinstance(json.loads(raw), dict)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "state-set-cookie-json",
+            '{"Set-Cookie":"session=STATE-SET-COOKIE; HttpOnly","mode":"inspect"}',
+            ("STATE-SET-COOKIE",),
+        ),
+        (
+            "state-set-cookie-python",
+            "{'setCookie':'session=STATE-SET-COOKIE-CAMEL; Secure','mode':'inspect'}",
+            ("STATE-SET-COOKIE-CAMEL",),
+        ),
+        (
+            "state-qualified-set-cookie",
+            '{"headers.set_cookie":"session=STATE-QUALIFIED-COOKIE; Path=/","mode":"inspect"}',
+            ("STATE-QUALIFIED-COOKIE",),
+        ),
+        (
+            "state-qualified-authorization",
+            '{"headers.authorization":"Digest response=STATE-QUALIFIED-AUTH","mode":"inspect"}',
+            ("STATE-QUALIFIED-AUTH",),
+        ),
+        (
+            "state-qualified-proxy-authorization",
+            "{'headers.proxyAuthorization':'Custom STATE-QUALIFIED-PROXY-AUTH',"
+            "'mode':'inspect'}",
+            ("STATE-QUALIFIED-PROXY-AUTH",),
+        ),
+        (
+            "state-compact-authorization",
+            '{"headersauthorization":"Basic STATE-COMPACT-AUTH","mode":"inspect"}',
+            ("STATE-COMPACT-AUTH",),
+        ),
+        (
+            "state-compact-set-cookie",
+            "{'headerssetcookie':'session=STATE-COMPACT-COOKIE; Secure','mode':'inspect'}",
+            ("STATE-COMPACT-COOKIE",),
+        ),
+    ],
+)
+def test_state_write_sanitizes_cookie_and_qualified_authorization_keys(
+    tmp_path, request_id: str, message: str, forbidden: tuple[str, ...]
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(record.request_id).read_text(encoding="utf-8")
+
+    for secret in forbidden:
+        assert secret not in raw
+    assert "<redacted>" in raw
+    assert "inspect" in raw
+    assert isinstance(json.loads(raw), dict)

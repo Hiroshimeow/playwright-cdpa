@@ -44,6 +44,8 @@ _KNOWN_SECRET_LABELS = {
     "resumeconversationtoken",
     "session_token",
     "sessiontoken",
+    "set_cookie",
+    "setcookie",
     "signature",
     "signing_key",
     "signingkey",
@@ -62,9 +64,6 @@ _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}
 _AUTHORIZATION_HEADER = re.compile(
     r"(?i)\b(?P<label>proxy-authorization|authorization)"
     r"(?P<separator>\s*[:=]\s*)"
-)
-_AUTHORIZATION_SAFE_SUFFIX = re.compile(
-    r"(?i);(?=\s+(?:retry|failed|failure|error|status|reason|request|operation)\b)"
 )
 _AUTH_SCHEME = re.compile(
     r"(?i)\b(?P<prefix>authorization\s*[:=]\s*)?"
@@ -91,6 +90,28 @@ _PATH_SECRET_CONTEXTS = {
     "webhook",
 }
 _PATH_SEPARATORS = "-_.:"
+_QUALIFIED_SECRET_SUFFIXES = ("_authorization", "_cookie", "_cookies")
+_COMPACT_HEADER_SECRET_SUFFIXES = (
+    "proxyauthorization",
+    "authorization",
+    "setcookie",
+    "cookies",
+    "cookie",
+)
+_COMPACT_HEADER_QUALIFIERS = {
+    "downstream",
+    "header",
+    "headers",
+    "http",
+    "https",
+    "network",
+    "proxy",
+    "request",
+    "requests",
+    "response",
+    "responses",
+    "upstream",
+}
 _PATH_PUBLIC_CONTEXTS = {
     "docs",
     "documentation",
@@ -114,9 +135,22 @@ def _normalize_secret_label(value: str) -> tuple[str, str]:
     return normalized, normalized.replace("_", "")
 
 
+def _qualified_header_secret_key(normalized: str, compact: str) -> bool:
+    if any(normalized.endswith(suffix) for suffix in _QUALIFIED_SECRET_SUFFIXES):
+        return True
+    for suffix in _COMPACT_HEADER_SECRET_SUFFIXES:
+        if not compact.endswith(suffix):
+            continue
+        qualifier = compact[: -len(suffix)]
+        return qualifier in _COMPACT_HEADER_QUALIFIERS
+    return False
+
+
 def _secret_key(key: str) -> bool:
     normalized, compact = _normalize_secret_label(key)
     if normalized in _KNOWN_SECRET_LABELS or compact in _KNOWN_SECRET_LABELS:
+        return True
+    if _qualified_header_secret_key(normalized, compact):
         return True
     if normalized.endswith("_token") or compact.endswith("token"):
         return True
@@ -293,12 +327,8 @@ def _sanitize_assignments(value: str) -> str:
 
 
 def _authorization_value_end(value: str, start: int) -> int:
-    line_end = len(value)
     newline = re.search(r"[\r\n]", value[start:])
-    if newline is not None:
-        line_end = start + newline.start()
-    safe_suffix = _AUTHORIZATION_SAFE_SUFFIX.search(value, start, line_end)
-    return safe_suffix.start() if safe_suffix is not None else line_end
+    return len(value) if newline is None else start + newline.start()
 
 
 def _sanitize_authorization_headers(value: str) -> str:

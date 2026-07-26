@@ -49,7 +49,10 @@ def test_free_form_credential_assignments_are_sanitized(diagnostic: str) -> None
 
     assert "secret-value" not in rendered
     assert "operation failed" in rendered
-    assert "retry later" in rendered
+    if diagnostic.startswith("Authorization"):
+        assert "retry later" not in rendered
+    else:
+        assert "retry later" in rendered
     assert "<redacted>" in rendered
 
 
@@ -903,3 +906,265 @@ def test_proxy_authorization_values_are_removed_from_nested_and_failure_surfaces
             for secret in forbidden:
                 assert secret not in output
             assert "<redacted>" in output
+
+
+_AUTHORIZATION_SUFFIX_WORDS = (
+    "retry",
+    "failed",
+    "failure",
+    "error",
+    "status",
+    "reason",
+    "request",
+    "operation",
+)
+
+
+@pytest.mark.parametrize("header", ["Authorization", "Proxy-Authorization"])
+@pytest.mark.parametrize("suffix_word", _AUTHORIZATION_SUFFIX_WORDS)
+def test_explicit_authorization_headers_redact_every_same_line_suffix_parameter(
+    header: str, suffix_word: str
+) -> None:
+    diagnostic = (
+        f"{header}: CustomScheme AUTH-PRIMARY; "
+        f"{suffix_word}=AUTH-{suffix_word.upper()}-TAIL\nnext diagnostic line"
+    )
+
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert "AUTH-PRIMARY" not in rendered
+    assert f"AUTH-{suffix_word.upper()}-TAIL" not in rendered
+    assert rendered == f"{header}: <redacted>\nnext diagnostic line"
+
+
+@pytest.mark.parametrize("suffix_word", _AUTHORIZATION_SUFFIX_WORDS)
+def test_authorization_suffix_parameters_are_removed_from_nested_and_failure_surfaces(
+    suffix_word: str,
+) -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    canary = f"NESTED-AUTH-{suffix_word.upper()}-TAIL"
+    diagnostic = (
+        f"Authorization: CustomScheme NESTED-AUTH-PRIMARY; {suffix_word}={canary}"
+        "\nnext diagnostic line"
+    )
+    outputs = (
+        safe_json_dumps({"failure": {"message": diagnostic}}),
+        json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict()),
+    )
+
+    for output in outputs:
+        assert "NESTED-AUTH-PRIMARY" not in output
+        assert canary not in output
+        assert "next diagnostic line" in output
+        assert "<redacted>" in output
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("Set-Cookie", "session=COOKIE-SET-HEADER; HttpOnly"),
+        ("set_cookie", "session=COOKIE-SET-SNAKE; Secure"),
+        ("setCookie", "session=COOKIE-SET-CAMEL; SameSite=Lax"),
+        ("setcookie", "session=COOKIE-SET-COMPACT; Path=/"),
+        ("headers.Set-Cookie", "session=COOKIE-QUALIFIED-DOTTED; HttpOnly"),
+        ("response/set_cookie", "session=COOKIE-QUALIFIED-SLASH; Secure"),
+        ("headersSetCookie", "session=COOKIE-QUALIFIED-CAMEL; Path=/"),
+        ("headerssetcookie", "session=COOKIE-QUALIFIED-COMPACT; Path=/"),
+        ("headers.cookie", "session=COOKIE-QUALIFIED-COOKIE"),
+        ("request.cookies", "session=COOKIE-QUALIFIED-COOKIES"),
+    ],
+)
+def test_structured_cookie_header_keys_redact_complete_values(label: str, value: str) -> None:
+    rendered = safe_json_dumps({"headers": {label: value}, "mode": "inspect"})
+    parsed = json.loads(rendered)
+
+    assert value not in rendered
+    assert parsed["headers"][label] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "canary", "preserved"),
+    [
+        (
+            '{"Set-Cookie":"session=QUOTED-COOKIE-SET; HttpOnly","mode":"inspect"}',
+            "QUOTED-COOKIE-SET",
+            '"mode":"inspect"',
+        ),
+        (
+            "{'set_cookie':'session=QUOTED-COOKIE-SNAKE; Secure','mode':'inspect'}",
+            "QUOTED-COOKIE-SNAKE",
+            "'mode':'inspect'",
+        ),
+        (
+            '{"setCookie":"session=QUOTED-COOKIE-CAMEL; Path=/","mode":"inspect"}',
+            "QUOTED-COOKIE-CAMEL",
+            '"mode":"inspect"',
+        ),
+        (
+            "{'setcookie':'session=QUOTED-COOKIE-COMPACT; Path=/','mode':'inspect'}",
+            "QUOTED-COOKIE-COMPACT",
+            "'mode':'inspect'",
+        ),
+        (
+            '{"headers.Set-Cookie":"session=QUOTED-COOKIE-QUALIFIED; HttpOnly",'
+            '"mode":"inspect"}',
+            "QUOTED-COOKIE-QUALIFIED",
+            '"mode":"inspect"',
+        ),
+        (
+            "{'headersSetCookie':'session=QUOTED-COOKIE-QUALIFIED-CAMEL; Secure',"
+            "'mode':'inspect'}",
+            "QUOTED-COOKIE-QUALIFIED-CAMEL",
+            "'mode':'inspect'",
+        ),
+        (
+            '{"headerssetcookie":"session=QUOTED-COOKIE-QUALIFIED-COMPACT; Secure",'
+            '"mode":"inspect"}',
+            "QUOTED-COOKIE-QUALIFIED-COMPACT",
+            '"mode":"inspect"',
+        ),
+    ],
+)
+def test_quoted_cookie_header_keys_redact_complete_values(
+    diagnostic: str, canary: str, preserved: str
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert canary not in rendered
+    assert "<redacted>" in rendered
+    assert preserved in rendered
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "headers.authorization",
+        "request/authorization",
+        "response:authorization",
+        "headers_authorization",
+        "request-authorization",
+        "headersAuthorization",
+        "headersauthorization",
+        "headers.proxy_authorization",
+        "request/proxy-authorization",
+        "response:proxyAuthorization",
+        "headersProxyAuthorization",
+        "headersproxyauthorization",
+    ],
+)
+def test_qualified_authorization_mapping_keys_redact_complete_values(label: str) -> None:
+    value = f"Digest response=QUALIFIED-{label.replace('/', '-').replace(':', '-')}"
+    rendered = safe_json_dumps({label: value, "mode": "inspect"})
+    parsed = json.loads(rendered)
+
+    assert value not in rendered
+    assert parsed[label] == "<redacted>"
+    assert parsed["mode"] == "inspect"
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "canary", "preserved"),
+    [
+        (
+            '{"headers.authorization":"Digest response=QUOTED-AUTH-DOTTED","mode":"inspect"}',
+            "QUOTED-AUTH-DOTTED",
+            '"mode":"inspect"',
+        ),
+        (
+            "{'request/authorization':'Custom QUOTED-AUTH-SLASH','mode':'inspect'}",
+            "QUOTED-AUTH-SLASH",
+            "'mode':'inspect'",
+        ),
+        (
+            '{"response:authorization":"Basic QUOTED-AUTH-COLON","mode":"inspect"}',
+            "QUOTED-AUTH-COLON",
+            '"mode":"inspect"',
+        ),
+        (
+            "{'headersAuthorization':'Digest response=QUOTED-AUTH-CAMEL','mode':'inspect'}",
+            "QUOTED-AUTH-CAMEL",
+            "'mode':'inspect'",
+        ),
+        (
+            '{"headersauthorization":"Custom QUOTED-AUTH-COMPACT","mode":"inspect"}',
+            "QUOTED-AUTH-COMPACT",
+            '"mode":"inspect"',
+        ),
+        (
+            "{'headers.proxyAuthorization':'Custom QUOTED-PROXY-AUTH-DOTTED','mode':'inspect'}",
+            "QUOTED-PROXY-AUTH-DOTTED",
+            "'mode':'inspect'",
+        ),
+        (
+            '{"headersProxyAuthorization":"Digest response=QUOTED-PROXY-AUTH-CAMEL",'
+            '"mode":"inspect"}',
+            "QUOTED-PROXY-AUTH-CAMEL",
+            '"mode":"inspect"',
+        ),
+        (
+            "{'headersproxyauthorization':'Custom QUOTED-PROXY-AUTH-COMPACT','mode':'inspect'}",
+            "QUOTED-PROXY-AUTH-COMPACT",
+            "'mode':'inspect'",
+        ),
+    ],
+)
+def test_quoted_qualified_authorization_keys_redact_complete_values(
+    diagnostic: str, canary: str, preserved: str
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert canary not in rendered
+    assert "<redacted>" in rendered
+    assert preserved in rendered
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "authorization_status",
+        "headers.authorization_status",
+        "authorization-guide",
+        "headers.authorization_schema",
+        "reauthorization",
+        "cookie_policy",
+        "headers.set_cookie_policy",
+        "set_cookie_docs",
+        "cookies_count",
+    ],
+)
+def test_authorization_and_cookie_near_match_keys_remain_visible(label: str) -> None:
+    value = "PUBLIC-DOCUMENTATION-VALUE"
+    rendered = safe_json_dumps({label: value})
+
+    assert value in rendered
+    assert "<redacted>" not in rendered
+
+
+def test_cookie_and_qualified_authorization_values_are_removed_from_nested_failure() -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    diagnostics = [
+        '{"Set-Cookie":"session=NESTED-SET-COOKIE; HttpOnly","mode":"inspect"}',
+        "{'headers.setCookie':'session=NESTED-QUALIFIED-COOKIE; Secure','mode':'inspect'}",
+        '{"headers.authorization":"Digest response=NESTED-QUALIFIED-AUTH","mode":"inspect"}',
+        "{'headers.proxyAuthorization':'Custom NESTED-QUALIFIED-PROXY-AUTH','mode':'inspect'}",
+    ]
+    forbidden = (
+        "NESTED-SET-COOKIE",
+        "NESTED-QUALIFIED-COOKIE",
+        "NESTED-QUALIFIED-AUTH",
+        "NESTED-QUALIFIED-PROXY-AUTH",
+    )
+
+    for diagnostic in diagnostics:
+        outputs = (
+            safe_json_dumps({"failure": {"message": diagnostic}}),
+            json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict()),
+        )
+        for output in outputs:
+            for secret in forbidden:
+                assert secret not in output
+            assert "<redacted>" in output
+            assert "inspect" in output
