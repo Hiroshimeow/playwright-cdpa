@@ -196,6 +196,13 @@ Schema absence, drift, or ambiguity must continue to fail closed.
 
 ## Replacement DEV turn 16 unmatched canonical-key facts — July 26, 2026
 
-- The missing-close quoted-key branch now decodes the bounded prefix before `:` or `=` with the same JSON/Python escape grammar used for matched quoted keys. Unicode-escaped Authorization, Proxy-Authorization, Set-Cookie, bracket, escaped-bracket, dotted qualified, and single-quoted equivalents therefore cannot bypass canonical secret classification when a log or serializer truncates the closing quote.
+- Turn 16 introduced canonical decoding for a missing-close prefix, but its first-delimiter assumption was incomplete when `:` or `=` also appeared inside a qualified key. Turn 17 supersedes that delimiter rule by evaluating every bounded candidate position.
 - An assignment-like unmatched key is preserved only when decoding succeeds and the canonical identity is provably nonsecret. Invalid escapes, control-bearing identities, over-bound prefixes, or canonical secret identities fail closed to `<redacted>` for the complete diagnostic.
 - Direct diagnostics, nested JSON, `Failure`, atomic state writes, CLI JSON stdout/stderr, valid outer JSON, and invariant exit `20` are covered. The correction is local to redaction and output/state boundaries; all accepted transport, identity, graph, monitor, ownership, recovery, helper, cancellation, backend, and CLI architecture remains unchanged.
+
+## Replacement DEV turn 17 unmatched delimiter-disambiguation facts — July 26, 2026
+
+- Missing-close quoted assignments now evaluate all raw `:` and `=` positions on the physical line from longest to shortest. Each candidate prefix uses the same JSON/Python escape decoder and secret classifier as matched quoted keys, so internal separators cannot hide a later Unicode-escaped Authorization, Proxy-Authorization, or Set-Cookie component.
+- Candidate analysis is bounded by the raw expansion ceiling implied by the 256-character decoded key limit. Any secret-equivalent, undecodable, control-bearing, or over-bound candidate fails closed for the complete diagnostic; preservation requires every plausible candidate to decode successfully as nonsecret.
+- An 84-case matrix covers seven approved qualifier shapes, three escaped secret suffixes, colon/equal internal separators, and both quote styles. Representative nested, `Failure`, state, and CLI tests verify valid JSON, exit `20`, empty stderr, and zero canary leakage while a canonical nonsecret internal-separator control remains visible.
+- The correction is local to redaction and public output/state boundaries. Transport, identity, graph, monitor, state machine, ownership, locking, recovery, helper lifecycle, cancellation, backend access, and CLI architecture are unchanged.

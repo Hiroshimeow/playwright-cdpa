@@ -1613,3 +1613,81 @@ def test_missing_close_canonical_nonsecret_key_remains_visible() -> None:
     diagnostic = r'{"mode\u002ename: PUBLIC-MISSING-CLOSE-CONTEXT'
 
     assert sanitize_diagnostic(diagnostic) == diagnostic
+
+
+_MISSING_CLOSE_INTERNAL_DELIMITER_CASES = [
+    (
+        f"{{{quote}{qualifier}{internal_separator}{secret_suffix}: "
+        f"INTERNAL-DELIMITER-{case_index}",
+        f"INTERNAL-DELIMITER-{case_index}",
+    )
+    for case_index, (qualifier, secret_suffix, internal_separator, quote) in enumerate(
+        (
+            (qualifier, secret_suffix, internal_separator, quote)
+            for qualifier in (
+                "headers",
+                "request",
+                "response",
+                "request:headers",
+                "network:request:headers",
+                "upstream:request:headers",
+                "downstream:response:headers",
+            )
+            for secret_suffix in (
+                r"Authoriz\u0061tion",
+                r"Proxy-Authoriz\u0061tion",
+                r"Set-Cook\u0069e",
+            )
+            for internal_separator in (":", "=")
+            for quote in ('"', "'")
+        )
+    )
+]
+
+
+@pytest.mark.parametrize(("diagnostic", "canary"), _MISSING_CLOSE_INTERNAL_DELIMITER_CASES)
+def test_missing_close_internal_delimiters_do_not_hide_canonical_secret_components(
+    diagnostic: str, canary: str
+) -> None:
+    rendered = sanitize_diagnostic(diagnostic)
+
+    assert rendered == "<redacted>"
+    assert canary not in rendered
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "canary"),
+    [
+        (
+            r'{"headers:Authoriz\u0061tion: NESTED-INTERNAL-AUTH',
+            "NESTED-INTERNAL-AUTH",
+        ),
+        (
+            r"{'request:headers:Proxy-Authoriz\u0061tion: NESTED-INTERNAL-PROXY",
+            "NESTED-INTERNAL-PROXY",
+        ),
+        (
+            r'{"response=Set-Cook\u0069e: NESTED-INTERNAL-COOKIE',
+            "NESTED-INTERNAL-COOKIE",
+        ),
+    ],
+)
+def test_missing_close_internal_delimiter_secrets_are_removed_from_nested_failure(
+    diagnostic: str, canary: str
+) -> None:
+    from playwright_gpt_core.errors import Failure, FailureCategory
+
+    outputs = (
+        safe_json_dumps({"failure": {"message": diagnostic}}),
+        json.dumps(Failure(FailureCategory.INVARIANT, diagnostic).to_dict()),
+    )
+
+    for output in outputs:
+        assert canary not in output
+        assert "<redacted>" in output
+
+
+def test_missing_close_internal_delimiter_nonsecret_key_remains_visible() -> None:
+    diagnostic = r'{"mode:display\u002ename: PUBLIC-INTERNAL-CONTEXT'
+
+    assert sanitize_diagnostic(diagnostic) == diagnostic

@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsp
 _REDACTED = "<redacted>"
 _MAX_DIAGNOSTIC = 8192
 _MAX_MAPPING_KEY = 256
+_MAX_QUOTED_KEY_RAW = _MAX_MAPPING_KEY * 6
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_LABEL = re.compile(r"[^a-z0-9]+")
 _KNOWN_SECRET_LABELS = {
@@ -444,15 +445,21 @@ def _quoted_assignment_value(value: str, start: int) -> tuple[int, str]:
 
 def _malformed_secret_quoted_key(raw: str, quote_character: str) -> bool:
     separator_positions = [
-        position for position in (raw.find(":"), raw.find("=")) if position >= 0
+        position for position, character in enumerate(raw) if character in ":="
     ]
     if not separator_positions:
         return False
-    prefix = raw[: min(separator_positions)].strip(" \t\"'")
-    if not prefix:
-        return False
-    decoded_key = _decode_quoted_key(prefix, quote_character)
-    return decoded_key is None or _secret_key(decoded_key)
+
+    for position in reversed(separator_positions):
+        prefix = raw[:position].strip(" \t\"'")
+        if not prefix:
+            continue
+        if len(prefix) > _MAX_QUOTED_KEY_RAW:
+            return True
+        decoded_key = _decode_quoted_key(prefix, quote_character)
+        if decoded_key is None or _secret_key(decoded_key):
+            return True
+    return False
 
 
 def _sanitize_quoted_assignments(value: str) -> tuple[str, bool]:

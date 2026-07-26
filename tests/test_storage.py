@@ -914,3 +914,50 @@ def test_state_write_fails_closed_for_missing_close_canonical_secret_key(
     assert forbidden not in raw
     assert "<redacted>" in raw
     assert parsed["failure"]["message"] == "<redacted>"
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "state-internal-colon-auth",
+            r'{"headers:Authoriz\u0061tion: STATE-INTERNAL-COLON-AUTH',
+            "STATE-INTERNAL-COLON-AUTH",
+        ),
+        (
+            "state-internal-nested-auth",
+            r'{"request:headers:Authoriz\u0061tion: STATE-INTERNAL-NESTED-AUTH',
+            "STATE-INTERNAL-NESTED-AUTH",
+        ),
+        (
+            "state-internal-equals-auth",
+            r'{"headers=Authoriz\u0061tion: STATE-INTERNAL-EQUALS-AUTH',
+            "STATE-INTERNAL-EQUALS-AUTH",
+        ),
+        (
+            "state-internal-proxy",
+            r"{'headers:Proxy-Authoriz\u0061tion: STATE-INTERNAL-PROXY",
+            "STATE-INTERNAL-PROXY",
+        ),
+        (
+            "state-internal-cookie",
+            r'{"response:Set-Cook\u0069e: STATE-INTERNAL-COOKIE',
+            "STATE-INTERNAL-COOKIE",
+        ),
+    ],
+)
+def test_state_write_fails_closed_for_internal_delimiter_canonical_secret_key(
+    tmp_path, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+
+    store.save(record)
+    raw = store.turn_path(request_id).read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+
+    assert forbidden not in raw
+    assert parsed["failure"]["message"] == "<redacted>"

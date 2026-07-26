@@ -819,3 +819,54 @@ def test_get_json_does_not_print_missing_close_canonical_secret_values(
     assert forbidden not in captured.err
     assert parsed["failure"]["message"] == "<redacted>"
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("request_id", "message", "forbidden"),
+    [
+        (
+            "cli-internal-colon-auth",
+            r'{"headers:Authoriz\u0061tion: CLI-INTERNAL-COLON-AUTH',
+            "CLI-INTERNAL-COLON-AUTH",
+        ),
+        (
+            "cli-internal-nested-auth",
+            r'{"request:headers:Authoriz\u0061tion: CLI-INTERNAL-NESTED-AUTH',
+            "CLI-INTERNAL-NESTED-AUTH",
+        ),
+        (
+            "cli-internal-equals-auth",
+            r'{"headers=Authoriz\u0061tion: CLI-INTERNAL-EQUALS-AUTH',
+            "CLI-INTERNAL-EQUALS-AUTH",
+        ),
+        (
+            "cli-internal-proxy",
+            r"{'headers:Proxy-Authoriz\u0061tion: CLI-INTERNAL-PROXY",
+            "CLI-INTERNAL-PROXY",
+        ),
+        (
+            "cli-internal-cookie",
+            r'{"response:Set-Cook\u0069e: CLI-INTERNAL-COOKIE',
+            "CLI-INTERNAL-COOKIE",
+        ),
+    ],
+)
+def test_get_json_does_not_print_internal_delimiter_canonical_secret_values(
+    tmp_path, capsys, request_id: str, message: str, forbidden: str
+) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id=request_id, prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(FailureCategory.INVARIANT, message),
+    )
+    store.save(record)
+
+    code = main(["get", request_id, "--state-dir", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+
+    assert code == 20
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert parsed["failure"]["message"] == "<redacted>"
+    assert captured.err == ""
