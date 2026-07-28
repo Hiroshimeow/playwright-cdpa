@@ -40,6 +40,21 @@ _STOP_SELECTORS = (
     'button[aria-label="Stop generating"]:visible',
     'button[aria-label^="Stop"]:visible',
 )
+_COMPOSER_TEXT_READER = r"""(element) => {
+  if (!element) return '';
+  if (element.tagName === 'TEXTAREA') return String(element.value ?? '');
+  const nodeText = (node) => {
+    if (node.nodeType === 3) {
+      return String(node.nodeValue ?? '').replace(/\u00a0/g, ' ');
+    }
+    if (node.nodeName === 'BR') return '\n';
+    return [...node.childNodes].map(nodeText).join('');
+  };
+  return [...element.childNodes].map((node) => {
+    const text = nodeText(node);
+    return text === '\n' ? '' : text;
+  }).join('\n');
+}"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +84,9 @@ async def observe_frontend(page: Page) -> FrontendState:
     try:
         raw = await page.evaluate(
             """() => {
+              const readComposerText = """
+            + _COMPOSER_TEXT_READER
+            + """;
               const visible = (element) => Boolean(element && element.getClientRects().length &&
                 getComputedStyle(element).visibility !== 'hidden');
               const firstVisible = (selectors) => [...document.querySelectorAll(selectors)]
@@ -111,9 +129,7 @@ async def observe_frontend(page: Page) -> FrontendState:
                   composer.getAttribute('aria-disabled') !== 'true' &&
                   (composer.tagName === 'TEXTAREA' ||
                     composer.getAttribute('contenteditable') === 'true')),
-                composer_text: String(
-                  composer?.value ?? composer?.innerText ?? composer?.textContent ?? ''
-                ),
+                composer_text: readComposerText(composer),
                 attachment_count: attachments.length,
                 send_visible: Boolean(send),
                 send_enabled: enabled,
@@ -515,6 +531,9 @@ async def click_send_atomic(
         result = await page.evaluate(
             """({prompt: expectedPrompt, target_path_pattern: expectedPathPattern,
                     attachment_names: expectedAttachmentNames}) => {
+              const readComposerText = """
+            + _COMPOSER_TEXT_READER
+            + """;
               const current = new URL(window.location.href);
               const exactOrigin = current.protocol === 'https:' &&
                 ['chatgpt.com', 'www.chatgpt.com'].includes(current.hostname.toLowerCase()) &&
@@ -534,10 +553,8 @@ async def click_send_atomic(
               )].filter(visible);
               if (composers.length !== 1) return {ok: false, reason: 'composer_identity'};
               const composer = composers[0];
-              const text = String(
-                composer.value ?? composer.innerText ?? composer.textContent ?? ''
-              ).trim();
-              if (text !== expectedPrompt.trim()) {
+              const text = readComposerText(composer);
+              if (text !== expectedPrompt) {
                 return {ok: false, reason: 'composer_changed'};
               }
               if (composer.disabled || composer.getAttribute('aria-disabled') === 'true') {
@@ -662,20 +679,16 @@ async def fill_composer(page: Page, prompt: str) -> None:
 
 async def verify_composer(page: Page, prompt: str) -> None:
     composer = await find_composer(page)
-    observed = await composer.evaluate(
-        "element => element.value ?? element.innerText ?? element.textContent ?? ''"
-    )
-    if str(observed).strip() != prompt.strip():
+    observed = await composer.evaluate(_COMPOSER_TEXT_READER)
+    if str(observed) != prompt:
         raise FrontendNotReadyError("composer content could not be verified before Send")
 
 
 async def clear_composer(page: Page) -> None:
     composer = await find_composer(page)
     await composer.fill("")
-    observed = await composer.evaluate(
-        "element => element.value ?? element.innerText ?? element.textContent ?? ''"
-    )
-    if str(observed).strip():
+    observed = await composer.evaluate(_COMPOSER_TEXT_READER)
+    if str(observed):
         raise FrontendNotReadyError("composer could not be cleared")
 
 
