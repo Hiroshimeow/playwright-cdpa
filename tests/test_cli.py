@@ -19,11 +19,11 @@ from playwright_api.models import Result, TurnIdentity, TurnRecord, TurnState
 from playwright_api.storage import StateStore
 
 
-def test_cli_acceptance_surface_requires_explicit_target() -> None:
+def test_cli_acceptance_surface_uses_one_typed_target() -> None:
     parser = build_parser()
-    args = parser.parse_args(["send", "Reply OK", "--fresh", "--json"])
+    args = parser.parse_args(["send", "Reply OK", "--json"])
     assert args.command == "send"
-    assert args.fresh is True
+    assert args.target == "/"
     args = parser.parse_args(["get", "req-1", "--json"])
     assert args.command == "get"
     args = parser.parse_args(["status", "req-1", "--json"])
@@ -32,8 +32,8 @@ def test_cli_acceptance_surface_requires_explicit_target() -> None:
         [
             "send",
             "next",
-            "--conversation",
-            "conversation-1",
+            "--target",
+            "/c/conversation-1",
             "--coordination-dir",
             "/tmp/shared-coordination",
             "--deployment-id",
@@ -106,7 +106,7 @@ def test_retired_command_aliases_are_rejected(command, capsys) -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["send", "prompt", "--fresh", "--request-id", ""],
+        ["send", "prompt", "--request-id", ""],
         ["get", "../escape"],
     ],
 )

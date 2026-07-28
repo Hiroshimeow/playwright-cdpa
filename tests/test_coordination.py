@@ -8,6 +8,7 @@ import pytest
 from playwright_api.config import ClientConfig
 from playwright_api.errors import OwnershipConflictError
 from playwright_api.service import ChatGPTClient
+from playwright_api.targets import ChatTarget
 
 
 def test_different_result_stores_share_one_deployment_claim(tmp_path) -> None:
@@ -118,7 +119,7 @@ async def test_deadline_claim_does_not_bypass_held_conversation_lock(
         owner.coordination.release("conversation-1", "foreign-request", terminal=True)
         result = await contender.send(
             "next",
-            conversation="conversation-1",
+            target=ChatTarget.conversation("conversation-1"),
             request_id="contender-request",
         )
         assert contender.coordination.load("conversation-1").active_request_id is None
@@ -210,7 +211,7 @@ async def test_foreign_claim_fails_without_loading_foreign_turn_state(tmp_path) 
     owner.coordination.claim("conversation-1", "foreign-request")
 
     result = await contender.send(
-        "next", conversation="conversation-1", request_id="contender-request"
+        "next", target=ChatTarget.conversation("conversation-1"), request_id="contender-request"
     )
 
     from playwright_api.cli import EXIT_OWNERSHIP, exit_code
@@ -246,7 +247,7 @@ async def test_wait_idle_polls_shared_claim_without_foreign_state_lookup(tmp_pat
 
     result = await contender.send(
         "next",
-        conversation="conversation-1",
+        target=ChatTarget.conversation("conversation-1"),
         request_id="waiting-request",
     )
 

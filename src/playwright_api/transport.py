@@ -13,6 +13,7 @@ from .errors import AmbiguousOutcomeError, BackendError, SchemaDriftError
 from .frontend import click_send_atomic
 from .models import TurnIdentity
 from .schema import decode_identifier, decode_optional_identifier
+from .targets import ChatTarget
 
 AcceptedCallback = Callable[["FrontendAcceptance"], Awaitable[None]]
 
@@ -202,7 +203,8 @@ async def send_real(
     page: Page,
     *,
     prompt: str,
-    target_conversation_id: str | None,
+    target: ChatTarget,
+    expected_attachment_names: dict[str, int] | None,
     send_timeout: float,
     on_accepted: AcceptedCallback,
 ) -> FrontendHandoff:
@@ -213,7 +215,8 @@ async def send_real(
             await click_send_atomic(
                 page,
                 prompt,
-                conversation_id=target_conversation_id,
+                target=target,
+                expected_attachment_names=expected_attachment_names,
             )
         response = await response_info.value
     except PlaywrightTimeoutError as exc:

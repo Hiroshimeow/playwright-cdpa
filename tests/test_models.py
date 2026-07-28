@@ -48,7 +48,7 @@ def test_helper_target_ownership_round_trips_in_schema_four(tmp_path) -> None:
     )
     saved = store.save(record)
     loaded = store.load("helper")
-    assert saved.schema_version == 4
+    assert saved.schema_version == 5
     assert loaded.helper_page_target_id == "target-123"
     assert loaded.helper_page_closed_at is None
     closed = store.save(loaded.with_helper_page_closed(), expected_revision=loaded.revision)
@@ -62,7 +62,7 @@ def test_schema_three_record_migrates_without_helper_ownership() -> None:
     payload.pop("helper_page_keep")
     payload.pop("helper_page_closed_at")
     migrated = TurnRecord.from_dict(payload)
-    assert migrated.schema_version == 4
+    assert migrated.schema_version == 5
     assert migrated.helper_page_target_id is None
     assert migrated.helper_page_keep is False
     assert migrated.helper_page_closed_at is None

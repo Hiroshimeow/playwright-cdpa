@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from playwright_api.frontend import _find_visible, click_send_atomic, observe_frontend
+from playwright_api.targets import ChatTarget
 
 
 class Locator:
@@ -81,12 +82,14 @@ async def test_atomic_send_rejects_query_and_fragment_in_browser_callback() -> N
     await click_send_atomic(
         page,  # type: ignore[arg-type]
         "prompt",
-        conversation_id="conversation-1",
+        target=ChatTarget.conversation("conversation-1"),
+        expected_attachment_names={},
     )
 
     assert "current.search === ''" in page.script
     assert "current.hash === ''" in page.script
     assert page.payload == {
         "prompt": "prompt",
-        "conversation_id": "conversation-1",
+        "target_path": "/c/conversation-1",
+        "attachment_names": {},
     }

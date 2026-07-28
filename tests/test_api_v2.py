@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 
 import pytest
 
@@ -19,6 +20,7 @@ from playwright_api.config import ClientConfig
 from playwright_api.errors import ConflictingIdentityError, Failure, FailureCategory
 from playwright_api.models import Result, SendProvenance, TurnRecord, TurnState
 from playwright_api.service import ChatGPTClient
+from playwright_api.targets import ChatTarget
 
 
 @pytest.mark.asyncio
@@ -45,19 +47,19 @@ async def test_existing_send_claims_before_creating_local_turn(tmp_path, monkeyp
     owner.coordination.claim("conversation-1", "foreign")
 
     async def fake_send_record(
-        self, record, prompt, conversation_id, *, claimed_conversation=None
+        self, record, prompt, target, *, claimed_coordination=None
     ):
         assert prompt == "next"
-        assert conversation_id == "conversation-1"
-        assert claimed_conversation == "conversation-1"
-        assert self.coordination.load(conversation_id).active_request_id == record.request_id
+        assert target == ChatTarget.conversation("conversation-1")
+        assert claimed_coordination == "conversation-1"
+        assert self.coordination.load(claimed_coordination).active_request_id == record.request_id
         return self._result(record)
 
     monkeypatch.setattr(ChatGPTClient, "_send_record", fake_send_record)
     task = asyncio.create_task(
         contender.send(
             "next",
-            conversation="conversation-1",
+            target=ChatTarget.conversation("conversation-1"),
             request_id="next-request",
         )
     )
@@ -114,9 +116,10 @@ async def test_competing_existing_sends_create_only_winning_local_turn(
         monkeypatch.setattr(coordination_store, "load", load)
 
     async def fake_send_record(
-        self, record, prompt, conversation_id, *, claimed_conversation=None
+        self, record, prompt, target, *, claimed_coordination=None
     ):
-        assert claimed_conversation == conversation_id == "conversation-1"
+        assert target == ChatTarget.conversation("conversation-1")
+        assert claimed_coordination == "conversation-1"
         winner_started.set()
         await hold.wait()
         return self._result(record)
@@ -126,7 +129,7 @@ async def test_competing_existing_sends_create_only_winning_local_turn(
         asyncio.create_task(
             core.send(
                 "next",
-                conversation="conversation-1",
+                target=ChatTarget.conversation("conversation-1"),
                 request_id=f"request-{index}",
             )
         )
@@ -360,9 +363,10 @@ def test_primary_cli_surface_is_send_get_status_cancel_only() -> None:
     assert "keep-helper-tab" not in help_text
 
     args = parser.parse_args(
-        ["send", "hello", "--fresh", "--request-id", "caller-id", "--json"]
+        ["send", "hello", "--target", "/", "--request-id", "caller-id", "--json"]
     )
     assert args.request_id == "caller-id"
+    assert args.target == "/"
     assert not hasattr(ChatGPTClient, "watch")
     assert not hasattr(ChatGPTClient, "recover")
     assert not hasattr(ChatGPTClient, "wait_idle_and_send")
@@ -580,10 +584,11 @@ async def test_active_frontend_with_send_ready_is_one_steering_boundary(
         _WaitBackend(),  # type: ignore[arg-type]
         record.request_id,
         "queued prompt",
-        "conversation-1",
+        ChatTarget.conversation("conversation-1"),
         "exact-target",
         record.revision,
         {},
+        Counter(),
     )
 
     assert state.send_ready is True
@@ -614,10 +619,11 @@ async def test_active_frontend_without_send_waits_and_preserves_exact_prompt(
         _WaitBackend(),  # type: ignore[arg-type]
         record.request_id,
         "queued prompt",
-        "conversation-1",
+        ChatTarget.conversation("conversation-1"),
         "exact-target",
         record.revision,
         {},
+        Counter(),
     )
 
     assert state.send_ready is True
@@ -652,10 +658,11 @@ async def test_preclick_owner_drift_is_invariant_not_owner_wait_timeout(
             _WaitBackend(),  # type: ignore[arg-type]
             record.request_id,
             "queued prompt",
-            "conversation-1",
+            ChatTarget.conversation("conversation-1"),
             "exact-target",
             record.revision,
             {},
+            Counter(),
         )
 
     failure = captured.value.as_failure()
@@ -687,16 +694,17 @@ async def test_fresh_send_wait_rejects_same_target_navigation_to_conversation(
     monkeypatch.setattr(service_module, "page_target_id", target_id)
     monkeypatch.setattr(service_module, "observe_frontend", observe)
 
-    with pytest.raises(FrontendNotReadyError, match="fresh Send"):
+    with pytest.raises(FrontendNotReadyError, match="exact Send target"):
         await core._wait_for_send_ready(
             _WaitPage(),  # type: ignore[arg-type]
             _WaitBackend(),  # type: ignore[arg-type]
             record.request_id,
             "queued prompt",
-            None,
+            ChatTarget.fresh(),
             "same-target",
             record.revision,
             {},
+            Counter(),
         )
 
     assert core.store.load(record.request_id).send_provenance == SendProvenance.NOT_ATTEMPTED
@@ -723,12 +731,13 @@ async def test_fresh_send_final_preclick_rejects_same_target_navigation_to_conve
     monkeypatch.setattr(service_module, "page_target_id", target_id)
     monkeypatch.setattr(service_module, "observe_frontend", observe)
 
-    with pytest.raises(FrontendNotReadyError, match="fresh Send"):
+    with pytest.raises(FrontendNotReadyError, match="exact Send target"):
         await core._validate_ready_state(
             _WaitPage(),  # type: ignore[arg-type]
             "queued prompt",
-            None,
+            ChatTarget.fresh(),
             "same-target",
+            Counter(),
         )
 
     assert core.store.load(record.request_id).send_provenance == SendProvenance.NOT_ATTEMPTED
@@ -753,8 +762,8 @@ def test_fresh_send_initial_state_rejects_unsupported_page(tmp_path, url) -> Non
     )
     state = _frontend_state(ready=True, url=url, composer_text="")
 
-    with pytest.raises(FrontendNotReadyError, match="fresh Send"):
-        core._validate_initial_send_state(state, None)
+    with pytest.raises(FrontendNotReadyError, match="exact Send target"):
+        core._validate_initial_send_state(state, ChatTarget.fresh())
 
 
 @pytest.mark.asyncio
@@ -820,10 +829,11 @@ async def test_attachment_drift_fails_before_click_boundary(tmp_path, monkeypatc
             _WaitBackend(),  # type: ignore[arg-type]
             record.request_id,
             "queued prompt",
-            "conversation-1",
+            ChatTarget.conversation("conversation-1"),
             "exact-target",
             record.revision,
             {},
+            Counter(),
         )
 
     assert core.store.load(record.request_id).send_provenance == SendProvenance.NOT_ATTEMPTED

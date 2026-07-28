@@ -134,6 +134,15 @@ class ProjectRegistry:
     def begin_creation(
         self, *, key: str, name: str, memory_scope: ProjectMemoryScope
     ) -> ProjectRecord:
+        return self.claim_creation(
+            key=key,
+            name=name,
+            memory_scope=memory_scope,
+        )[0]
+
+    def claim_creation(
+        self, *, key: str, name: str, memory_scope: ProjectMemoryScope
+    ) -> tuple[ProjectRecord, bool]:
         key = _validate_project_key(key)
         name = _validate_project_name(name)
         if not isinstance(memory_scope, ProjectMemoryScope):
@@ -143,10 +152,10 @@ class ProjectRegistry:
             if current is not None:
                 if current.name != name or current.memory_scope is not memory_scope:
                     raise ConflictingIdentityError("project key is bound to different metadata")
-                return current
+                return current, False
             record = ProjectRecord(key, name, memory_scope, True, None)
             self._write(self._path(key), record.to_dict())
-            return record
+            return record, True
 
     def resolve(self, key: str, project: ProjectRef) -> ProjectRecord:
         key = _validate_project_key(key)

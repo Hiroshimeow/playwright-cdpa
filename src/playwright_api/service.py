@@ -4,8 +4,9 @@ import asyncio
 import re
 import time
 import uuid
+from collections import Counter
+from collections.abc import Sequence
 from typing import Any
-from urllib.parse import urlparse
 
 from playwright.async_api import (
     Error as PlaywrightError,
@@ -17,6 +18,11 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+from .attachments import (
+    AttachmentInput,
+    snapshot_attachments,
+    validate_attachments_unchanged,
+)
 from .backend import AuthenticatedBackend
 from .config import ClientConfig
 from .connection import (
@@ -24,13 +30,14 @@ from .connection import (
     ConversationPage,
     close_page_by_target_id,
     page_target_id,
-    resolve_conversation_page,
+    resolve_target_page,
 )
 from .coordination import CoordinationStore
 from .errors import (
     AmbiguousOutcomeError,
     CancellationUnprovenError,
     ConcurrentStateError,
+    ConflictingIdentityError,
     CoreError,
     Failure,
     FailureCategory,
@@ -46,19 +53,36 @@ from .errors import (
 from .frontend import (
     ORIGIN,
     FrontendState,
+    attachment_names,
     click_stop_button,
+    create_project_frontend,
     fill_composer,
     find_stop_button,
+    list_projects_frontend,
     observe_frontend,
+    upload_attachments,
     verify_authenticated,
 )
 from .graph import GraphResolver, graph_fingerprints
 from .identity import discover_user_identity, merge_identity
-from .models import Result, SendProvenance, TurnIdentity, TurnRecord, TurnState
+from .models import (
+    AttachmentStage,
+    Result,
+    SendProvenance,
+    TurnIdentity,
+    TurnRecord,
+    TurnState,
+)
 from .monitor import CandidateConvergence, monitor_live
+from .projects import (
+    ProjectMemoryScope,
+    ProjectRef,
+    ProjectRegistry,
+    select_exact_project,
+)
 from .schema import decode_optional_identifier
 from .storage import StateStore
-from .targets import normalize_conversation
+from .targets import ChatTarget, TargetKind
 from .transport import FrontendAcceptance, send_real
 
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,160}$")
@@ -94,6 +118,7 @@ class ChatGPTClient:
     def __init__(self, config: ClientConfig | None = None) -> None:
         self.config = (config or ClientConfig()).validated()
         self.store = StateStore(self.config.state_dir)
+        self.projects = ProjectRegistry(self.config.state_dir)
         self._coordination: CoordinationStore | None = None
 
     @property
@@ -106,29 +131,29 @@ class ChatGPTClient:
         self,
         prompt: str,
         *,
-        fresh: bool = False,
-        conversation: str | None = None,
         request_id: str | None = None,
+        target: ChatTarget | None = None,
+        attachments: Sequence[AttachmentInput] = (),
     ) -> Result:
         if type(prompt) is not str:
             raise InvalidInputError("prompt must be exactly a string")
         if not prompt.strip():
             raise InvalidInputError("prompt must not be empty")
-        if fresh == (conversation is not None):
-            raise InvalidInputError("select exactly one send target: fresh or conversation")
-        conversation_id = (
-            normalize_conversation(conversation) if conversation is not None else None
-        )
+        if target is None:
+            target = ChatTarget.fresh()
+        if not isinstance(target, ChatTarget):
+            raise InvalidInputError("target must be a ChatTarget")
+        attachment_snapshots = snapshot_attachments(attachments)
         request_id = uuid.uuid4().hex if request_id is None else _require_request_id(request_id)
         request_path = self.store.turn_path(request_id)
         if request_path.exists():
             self.store.load(request_id)
             raise OwnershipConflictError(f"request_id {request_id!r} already exists")
 
-        claimed_conversation: str | None = None
-        if conversation_id is not None:
+        claimed_coordination: str | None = self._target_coordination_key(target)
+        if claimed_coordination is not None:
             try:
-                await self._claim_when_idle(conversation_id, request_id)
+                await self._claim_when_idle(claimed_coordination, request_id)
             except OwnerWaitTimeoutError as exc:
                 return Result(
                     schema_version=1,
@@ -136,27 +161,137 @@ class ChatGPTClient:
                     state=TurnState.FAILED,
                     failure=exc.as_failure(),
                 )
-            claimed_conversation = conversation_id
 
         try:
             record = self.store.create(
                 TurnRecord.new(
                     request_id=request_id,
                     prompt=prompt,
-                    target_kind="fresh" if fresh else "conversation",
-                    target_conversation_id=conversation_id,
+                    target=target,
+                    attachments=attachment_snapshots,
                 )
             )
         except Exception:
-            if claimed_conversation is not None:
-                self._release_if_owned(claimed_conversation, request_id, terminal=False)
+            if claimed_coordination is not None:
+                self._release_if_owned(claimed_coordination, request_id, terminal=False)
             raise
         return await self._send_record(
             record,
             prompt,
-            conversation_id,
-            claimed_conversation=claimed_conversation,
+            target,
+            claimed_coordination=claimed_coordination,
         )
+
+    async def find_project(
+        self,
+        *,
+        project_id: str | None = None,
+        name: str | None = None,
+    ) -> ProjectRef | None:
+        if project_id is None and name is None:
+            raise InvalidInputError("find_project requires project_id or name")
+        projects = await self._list_projects()
+        if project_id is not None:
+            target = ChatTarget.project(project_id)
+            matches = [project for project in projects if project.project_id == target.project_id]
+            if name is not None:
+                matches = [project for project in matches if project.name == name]
+            if len(matches) > 1:
+                raise ConflictingIdentityError("multiple exact projects matched")
+            return matches[0] if matches else None
+        assert name is not None
+        return select_exact_project(projects, name=name)
+
+    async def ensure_project(
+        self,
+        key: str,
+        name: str,
+        memory_scope: ProjectMemoryScope = ProjectMemoryScope.DEFAULT,
+    ) -> ProjectRef:
+        if not isinstance(memory_scope, ProjectMemoryScope):
+            raise InvalidInputError("invalid project memory scope")
+        existing = self.projects.load(key)
+        if existing is not None:
+            if existing.name != name or existing.memory_scope is not memory_scope:
+                raise ConflictingIdentityError("project key is bound to different metadata")
+            if existing.project is not None:
+                return existing.project
+
+        projects = await self._list_projects()
+        exact = select_exact_project(projects, name=name)
+        if existing is not None:
+            if exact is None:
+                raise AmbiguousOutcomeError(
+                    "project creation remains unknown; no second Create is allowed"
+                )
+            return self.projects.resolve(key, exact).project or exact
+
+        if exact is not None:
+            self.projects.begin_creation(
+                key=key,
+                name=name,
+                memory_scope=memory_scope,
+            )
+            return self.projects.resolve(key, exact).project or exact
+
+        _record, acquired = self.projects.claim_creation(
+            key=key,
+            name=name,
+            memory_scope=memory_scope,
+        )
+        if not acquired:
+            raise AmbiguousOutcomeError(
+                "project creation is owned or unknown; reconcile before Create"
+            )
+        created = await self._create_project(name, memory_scope)
+        if created.name != name or created.memory_scope is not memory_scope:
+            raise ConflictingIdentityError("created project identity differs from requested metadata")
+        return self.projects.resolve(key, created).project or created
+
+    async def open_project(self, project: ProjectRef) -> ChatTarget:
+        if not isinstance(project, ProjectRef):
+            raise InvalidInputError("project must be a ProjectRef")
+        return project.target
+
+    async def _list_projects(self) -> tuple[ProjectRef, ...]:
+        page: Page | None = None
+        try:
+            async with BrowserSession(self.config) as session:
+                assert session.context is not None
+                page = await session.context.new_page()
+                await page.goto(ORIGIN, wait_until="domcontentloaded", timeout=60_000)
+                await verify_authenticated(page)
+                return await list_projects_frontend(page)
+        finally:
+            if page is not None and not page.is_closed():
+                try:
+                    await page.close()
+                except PlaywrightError:
+                    pass
+
+    async def _create_project(
+        self,
+        name: str,
+        memory_scope: ProjectMemoryScope,
+    ) -> ProjectRef:
+        page: Page | None = None
+        try:
+            async with BrowserSession(self.config) as session:
+                assert session.context is not None
+                page = await session.context.new_page()
+                await page.goto(ORIGIN, wait_until="domcontentloaded", timeout=60_000)
+                await verify_authenticated(page)
+                return await create_project_frontend(
+                    page,
+                    name=name,
+                    memory_scope=memory_scope,
+                )
+        finally:
+            if page is not None and not page.is_closed():
+                try:
+                    await page.close()
+                except PlaywrightError:
+                    pass
 
     async def _claim_when_idle(self, conversation_id: str, request_id: str) -> None:
         deadline = time.monotonic() + self.config.timeout
@@ -224,9 +359,9 @@ class ChatGPTClient:
                     if record.helper_page_closed_at is None
                     else None
                 )
-                lease = await resolve_conversation_page(
+                lease = await resolve_target_page(
                     context,
-                    identity.conversation_id,
+                    self._recovery_target(record, identity.conversation_id),
                     preferred_target_id=preferred_target,
                 )
                 if lease.owned and lease.target_id != record.helper_page_target_id:
@@ -259,7 +394,11 @@ class ChatGPTClient:
                             raise
                 if lease.owned:
                     await self._close_owned_helper(context, request_id)
-            self._release_if_owned(identity.conversation_id, request_id, terminal=True)
+            self._release_if_owned(
+                self._coordination_key(record, identity.conversation_id),
+                request_id,
+                terminal=True,
+            )
             return self._result(self.store.load(request_id), response=candidate.text)
         except CoreError as exc:
             return await self._record_watch_failure(record, exc)
@@ -296,8 +435,8 @@ class ChatGPTClient:
                 record.request_cancellation().transition(TurnState.CANCELLED),
                 expected_revision=record.revision,
             )
-            if record.target_conversation_id:
-                self._release_if_owned(record.target_conversation_id, request_id, terminal=True)
+            if record.coordination_key:
+                self._release_if_owned(record.coordination_key, request_id, terminal=True)
             return self._result(record)
         record = self.store.save(
             record.request_cancellation(), expected_revision=record.revision
@@ -309,10 +448,11 @@ class ChatGPTClient:
                 "cannot prove cancellation without durable conversation identity",
             )
         conversation_id = identity.conversation_id
+        coordination_key = self._coordination_key(record, conversation_id)
         lease: ConversationPage | None = None
         try:
-            with self.coordination.lock(conversation_id, timeout=2.0):
-                owner = self.coordination.load(conversation_id).active_request_id
+            with self.coordination.lock(coordination_key, timeout=2.0):
+                owner = self.coordination.load(coordination_key).active_request_id
                 if owner != request_id:
                     raise CancellationUnprovenError(
                         "cancellation requires the exact shared conversation owner"
@@ -360,9 +500,9 @@ class ChatGPTClient:
                         if record.helper_page_closed_at is None
                         else None
                     )
-                    lease = await resolve_conversation_page(
+                    lease = await resolve_target_page(
                         context,
-                        conversation_id,
+                        self._recovery_target(record, conversation_id),
                         preferred_target_id=preferred_target,
                     )
                     await verify_authenticated(lease.page)
@@ -439,7 +579,11 @@ class ChatGPTClient:
                     expected_revision=current.revision,
                 )
             if identity.conversation_id:
-                self._release_if_owned(identity.conversation_id, request_id, terminal=True)
+                self._release_if_owned(
+                    self._coordination_key(current, identity.conversation_id),
+                    request_id,
+                    terminal=True,
+                )
             return self._result(current)
         if normalized in {"FAILED", "ERROR"}:
             raise CancellationUnprovenError(
@@ -460,7 +604,11 @@ class ChatGPTClient:
                     expected_revision=current.revision,
                 )
             if identity.conversation_id:
-                self._release_if_owned(identity.conversation_id, request_id, terminal=True)
+                self._release_if_owned(
+                    self._coordination_key(current, identity.conversation_id),
+                    request_id,
+                    terminal=True,
+                )
             return self._result(current, response=candidate.text)
         convergence.reset()
         return None
@@ -478,28 +626,35 @@ class ChatGPTClient:
         self,
         record: TurnRecord,
         prompt: str,
-        conversation_id: str | None,
+        target: ChatTarget,
         *,
-        claimed_conversation: str | None = None,
+        claimed_coordination: str | None = None,
     ) -> Result:
         click_entered = False
+        attachment_entered = False
         page: Page | None = None
         owned_page = False
         owned_target_id: str | None = None
         durable_handoff = False
         preserve_user_page = False
+        conversation_id = target.conversation_id
+        expected_attachment_names = Counter(item.path.name for item in record.attachments)
         try:
             async with BrowserSession(self.config) as session:
                 assert session.context is not None
                 context = session.context
                 backend = AuthenticatedBackend(context)
-                if conversation_id is None:
+                if target.kind is TargetKind.FRESH:
                     page = await context.new_page()
                     target_id = await page_target_id(context, page)
-                    await page.goto(ORIGIN, wait_until="domcontentloaded", timeout=60_000)
+                    await page.goto(
+                        target.canonical_url,
+                        wait_until="domcontentloaded",
+                        timeout=60_000,
+                    )
                     lease = ConversationPage(page, target_id, True)
                 else:
-                    lease = await resolve_conversation_page(context, conversation_id)
+                    lease = await resolve_target_page(context, target)
                     page = lease.page
                 owned_page = lease.owned
                 owned_target_id = lease.target_id if owned_page else None
@@ -510,13 +665,41 @@ class ChatGPTClient:
                         expected_revision=current.revision,
                     )
                 await verify_authenticated(page)
-                await self._wait_for_initial_composer(page, conversation_id)
+                await self._wait_for_initial_composer(page, target)
                 initial_user_graph: dict[str, str] = {}
                 if conversation_id is not None:
                     initial_snapshot = await backend.snapshot(conversation_id)
                     initial_user_graph = self._user_graph_fingerprints(
                         initial_snapshot.graph or {}
                     )
+
+                if record.attachments:
+                    current = self.store.load(record.request_id)
+                    record = self.store.save(
+                        current.transition(TurnState.PREPARING)
+                        .with_send_provenance(
+                            SendProvenance.ATTACHMENT_BOUNDARY_ENTERED
+                        )
+                        .with_attachment_stage(AttachmentStage.UPLOAD_STARTED),
+                        expected_revision=current.revision,
+                    )
+                    attachment_entered = True
+                    await upload_attachments(
+                        page,
+                        record.attachments,
+                        timeout=min(60.0, self.config.timeout),
+                    )
+                    validate_attachments_unchanged(record.attachments)
+                    if Counter(await attachment_names(page)) != expected_attachment_names:
+                        raise FrontendNotReadyError(
+                            "exact attachment identity changed after upload"
+                        )
+                    current = self.store.load(record.request_id)
+                    record = self.store.save(
+                        current.with_attachment_stage(AttachmentStage.VERIFIED),
+                        expected_revision=current.revision,
+                    )
+
                 expected_revision = self.store.load(record.request_id).revision
                 await fill_composer(page, prompt)
                 await self._wait_for_send_ready(
@@ -524,10 +707,11 @@ class ChatGPTClient:
                     backend,
                     record.request_id,
                     prompt,
-                    conversation_id,
+                    target,
                     lease.target_id,
                     expected_revision,
                     initial_user_graph,
+                    expected_attachment_names,
                 )
 
                 baseline_graph: dict[str, Any] = {}
@@ -551,13 +735,16 @@ class ChatGPTClient:
                     raise ConcurrentStateError(
                         "request changed while waiting for the Send boundary"
                     )
-                if conversation_id is not None:
-                    self._require_exact_owner(conversation_id, record.request_id)
+                coordination_key = self._target_coordination_key(target)
+                if coordination_key is not None:
+                    self._require_exact_owner(coordination_key, record.request_id)
+                validate_attachments_unchanged(current.attachments)
                 await self._validate_ready_state(
                     page,
                     prompt,
-                    conversation_id,
+                    target,
                     lease.target_id,
+                    expected_attachment_names,
                 )
                 partial = TurnIdentity(
                     conversation_id=conversation_id,
@@ -622,7 +809,8 @@ class ChatGPTClient:
                 handoff = await send_real(
                     page,
                     prompt=prompt,
-                    target_conversation_id=conversation_id,
+                    target=target,
+                    expected_attachment_names=dict(expected_attachment_names),
                     send_timeout=self.config.send_timeout,
                     on_accepted=on_accepted,
                 )
@@ -640,10 +828,16 @@ class ChatGPTClient:
                     raise AmbiguousOutcomeError(
                         "accepted Send has no durable conversation identity"
                     )
-                if claimed_conversation is None:
-                    with self.coordination.lock(identity.conversation_id, timeout=2.0):
-                        self.coordination.claim(identity.conversation_id, record.request_id)
-                    claimed_conversation = identity.conversation_id
+                await self._verify_accepted_target(page, target, identity.conversation_id)
+                if claimed_coordination is None:
+                    claimed_coordination = self._coordination_key(
+                        current, identity.conversation_id
+                    )
+                    with self.coordination.lock(claimed_coordination, timeout=2.0):
+                        self.coordination.claim(
+                            claimed_coordination,
+                            record.request_id,
+                        )
 
                 record = self.store.save(
                     current.with_identity(identity).transition(TurnState.SENT),
@@ -677,17 +871,22 @@ class ChatGPTClient:
                     expected_revision=record.revision,
                 )
                 self._release_if_owned(
-                    identity.conversation_id, record.request_id, terminal=True
+                    self._coordination_key(record, identity.conversation_id),
+                    record.request_id,
+                    terminal=True,
                 )
                 return self._result(record, response=candidate.text)
         except CoreError as exc:
-            preserve_user_page = isinstance(exc, _PreserveUserPageError)
+            mutation_entered = click_entered or attachment_entered
+            preserve_user_page = isinstance(exc, _PreserveUserPageError) or (
+                attachment_entered and not durable_handoff
+            )
             attempts = 4 if preserve_user_page else 1
             for _attempt in range(attempts):
                 current = self.store.load(record.request_id)
                 updated = current
                 if not current.terminal:
-                    state = TurnState.UNKNOWN if click_entered else TurnState.FAILED
+                    state = TurnState.UNKNOWN if mutation_entered else TurnState.FAILED
                     updated = current.transition(state, failure=exc.as_failure())
                 if preserve_user_page and owned_page:
                     if (
@@ -715,27 +914,52 @@ class ChatGPTClient:
                 raise ConcurrentStateError(
                     "request changed repeatedly during user-page preservation"
                 )
-            if claimed_conversation and not click_entered:
-                self._release_if_owned(claimed_conversation, current.request_id, terminal=True)
+            if claimed_coordination and not mutation_entered:
+                self._release_if_owned(
+                    claimed_coordination,
+                    current.request_id,
+                    terminal=True,
+                )
             return self._result(current)
         except Exception as exc:  # noqa: BLE001
+            mutation_entered = click_entered or attachment_entered
             current = self.store.load(record.request_id)
-            failure = self._unexpected_send_failure(exc, click_entered=click_entered)
-            state = TurnState.UNKNOWN if click_entered else TurnState.FAILED
+            failure = self._unexpected_send_failure(
+                exc,
+                click_entered=click_entered,
+                attachment_entered=attachment_entered,
+            )
+            state = TurnState.UNKNOWN if mutation_entered else TurnState.FAILED
             if not current.terminal:
                 current = self.store.save(
                     current.transition(state, failure=failure),
                     expected_revision=current.revision,
                 )
-            if claimed_conversation and not click_entered:
-                self._release_if_owned(claimed_conversation, current.request_id, terminal=True)
-            return self._result(current)
+            if claimed_coordination and not mutation_entered:
+                self._release_if_owned(
+                    claimed_coordination,
+                    current.request_id,
+                    terminal=True,
+                )
+            preserve_user_page = attachment_entered and not durable_handoff
+            if preserve_user_page and owned_page and owned_target_id is not None:
+                current = self.store.load(record.request_id)
+                if not current.helper_page_keep:
+                    try:
+                        self.store.save(
+                            current.with_helper_page(owned_target_id, keep=True),
+                            expected_revision=current.revision,
+                        )
+                    except ConcurrentStateError:
+                        pass
+            return self._result(self.store.load(record.request_id))
         finally:
+            mutation_entered = click_entered or attachment_entered
             if (
                 page is not None
                 and owned_page
                 and not preserve_user_page
-                and (not click_entered or (durable_handoff and not record.helper_page_keep))
+                and (not mutation_entered or (durable_handoff and not record.helper_page_keep))
             ):
                 try:
                     await self._close_current_helper(page, record.request_id)
@@ -743,7 +967,9 @@ class ChatGPTClient:
                     pass
 
     async def _wait_for_initial_composer(
-        self, page: Page, conversation_id: str | None
+        self,
+        page: Page,
+        target: ChatTarget,
     ) -> FrontendState:
         deadline = time.monotonic() + self.config.identity_timeout
         last_state: FrontendState | None = None
@@ -761,29 +987,19 @@ class ChatGPTClient:
                     "composer contains manual attachments; automated mutation is blocked"
                 )
             if state.composer_present and state.composer_editable:
-                self._validate_initial_send_state(state, conversation_id)
+                self._validate_initial_send_state(state, target)
                 return state
             await asyncio.sleep(self.config.poll)
         if last_state is not None:
-            self._validate_initial_send_state(last_state, conversation_id)
+            self._validate_initial_send_state(last_state, target)
         raise FrontendNotReadyError("ChatGPT composer did not become safely editable")
 
     def _validate_initial_send_state(
-        self, state: FrontendState, conversation_id: str | None
+        self,
+        state: FrontendState,
+        target: ChatTarget,
     ) -> None:
-        if conversation_id is not None:
-            try:
-                observed = normalize_conversation(state.url)
-            except InvalidInputError as exc:
-                raise FrontendNotReadyError(
-                    "exact conversation page was replaced before composer fill"
-                ) from exc
-            if observed != conversation_id:
-                raise FrontendNotReadyError(
-                    "exact conversation page changed before composer fill"
-                )
-        else:
-            self._validate_fresh_send_url(state.url, "before composer fill")
+        self._validate_target_url(state.url, target, "before composer fill")
         if state.choice_prompt:
             raise _PreserveUserPageError("choice prompt blocks automated Send")
         if not state.composer_present or not state.composer_editable:
@@ -801,30 +1017,23 @@ class ChatGPTClient:
         self,
         page: Page,
         prompt: str,
-        conversation_id: str | None,
+        target: ChatTarget,
         target_id: str,
+        expected_attachment_names: Counter[str],
     ) -> FrontendState:
         if await page_target_id(page.context, page) != target_id:
             raise FrontendNotReadyError("page target ownership changed before Send")
         state = await observe_frontend(page)
-        if conversation_id is not None:
-            try:
-                observed = normalize_conversation(state.url)
-            except InvalidInputError as exc:
-                raise FrontendNotReadyError(
-                    "exact conversation URL changed before Send"
-                ) from exc
-            if observed != conversation_id:
-                raise FrontendNotReadyError("exact conversation URL changed before Send")
-        else:
-            self._validate_fresh_send_url(state.url, "before Send")
+        self._validate_target_url(state.url, target, "before Send")
         if state.choice_prompt:
             raise _PreserveUserPageError("choice prompt appeared before Send")
         if not state.composer_present or not state.composer_editable:
             raise FrontendNotReadyError("composer became unavailable before Send")
         if state.composer_text.strip() != prompt.strip():
             raise _PreserveUserPageError("composer text changed before Send")
-        if state.attachment_count:
+        if state.attachment_count != sum(expected_attachment_names.values()):
+            raise _PreserveUserPageError("attachments changed before Send")
+        if expected_attachment_names and Counter(await attachment_names(page)) != expected_attachment_names:
             raise _PreserveUserPageError("attachments changed before Send")
         if not state.send_ready:
             raise FrontendNotReadyError("real Send control is not enabled")
@@ -836,44 +1045,40 @@ class ChatGPTClient:
         backend: AuthenticatedBackend,
         request_id: str,
         prompt: str,
-        conversation_id: str | None,
+        target: ChatTarget,
         target_id: str,
         expected_revision: int,
         initial_user_graph: dict[str, str],
+        expected_attachment_names: Counter[str],
     ) -> FrontendState:
         deadline = time.monotonic() + self.config.timeout
+        conversation_id = target.conversation_id
+        coordination_key = self._target_coordination_key(target)
         while time.monotonic() < deadline:
             current = self.store.load(request_id)
             if current.revision != expected_revision or current.cancellation_requested_at:
                 raise ConcurrentStateError("request changed while waiting for Send readiness")
-            if conversation_id is not None:
-                self._require_exact_owner(conversation_id, request_id)
+            if coordination_key is not None:
+                self._require_exact_owner(coordination_key, request_id)
             if await page_target_id(page.context, page) != target_id:
                 raise FrontendNotReadyError("page target ownership changed while waiting")
             state = await observe_frontend(page)
+            self._validate_target_url(state.url, target, "while waiting for Send")
             if conversation_id is not None:
-                try:
-                    observed = normalize_conversation(state.url)
-                except InvalidInputError as exc:
-                    raise FrontendNotReadyError(
-                        "exact conversation URL changed while waiting"
-                    ) from exc
-                if observed != conversation_id:
-                    raise FrontendNotReadyError("exact conversation URL changed while waiting")
                 snapshot = await backend.snapshot(conversation_id)
                 if self._user_graph_fingerprints(snapshot.graph or {}) != initial_user_graph:
                     raise FrontendNotReadyError(
                         "conversation user graph changed while waiting for Send"
                     )
-            else:
-                self._validate_fresh_send_url(state.url, "while waiting for Send")
             if state.choice_prompt:
                 raise _PreserveUserPageError("choice prompt appeared while waiting for Send")
             if not state.composer_present or not state.composer_editable:
                 raise FrontendNotReadyError("composer became unavailable while waiting")
             if state.composer_text.strip() != prompt.strip():
                 raise _PreserveUserPageError("composer text changed while waiting for Send")
-            if state.attachment_count:
+            if state.attachment_count != sum(expected_attachment_names.values()):
+                raise _PreserveUserPageError("attachments changed while waiting for Send")
+            if expected_attachment_names and Counter(await attachment_names(page)) != expected_attachment_names:
                 raise _PreserveUserPageError("attachments changed while waiting for Send")
             if state.send_ready:
                 return state
@@ -883,28 +1088,64 @@ class ChatGPTClient:
         )
 
     @staticmethod
-    def _validate_fresh_send_url(url: str, phase: str) -> None:
-        parsed = urlparse(url)
+    def _validate_target_url(url: str, target: ChatTarget, phase: str) -> None:
         try:
-            port = parsed.port
-        except ValueError as exc:
-            raise FrontendNotReadyError(f"fresh Send page was replaced {phase}") from exc
-        supported = (
-            parsed.scheme == "https"
-            and (parsed.hostname or "").casefold() in {"chatgpt.com", "www.chatgpt.com"}
-            and parsed.username is None
-            and parsed.password is None
-            and port in {None, 443}
-            and parsed.path in {"", "/"}
-            and not parsed.params
-            and not parsed.query
-            and not parsed.fragment
-        )
-        if not supported:
-            raise FrontendNotReadyError(f"fresh Send page was replaced {phase}")
+            observed = ChatTarget.parse(url)
+        except InvalidInputError as exc:
+            raise FrontendNotReadyError(f"exact Send target was replaced {phase}") from exc
+        if observed != target:
+            raise FrontendNotReadyError(f"exact Send target changed {phase}")
 
-    def _require_exact_owner(self, conversation_id: str, request_id: str) -> None:
-        owner = self.coordination.load(conversation_id).active_request_id
+    @staticmethod
+    def _target_coordination_key(target: ChatTarget) -> str | None:
+        if target.kind is TargetKind.PROJECT_CONVERSATION:
+            return target.coordination_key
+        return target.conversation_id
+
+    @staticmethod
+    def _coordination_key(record: TurnRecord, conversation_id: str) -> str:
+        if record.target_project_id is not None:
+            return ChatTarget.project_conversation(
+                record.target_project_id,
+                conversation_id,
+            ).coordination_key
+        return conversation_id
+
+    @staticmethod
+    def _recovery_target(record: TurnRecord, conversation_id: str) -> ChatTarget:
+        if record.target_project_id is not None:
+            return ChatTarget.project_conversation(
+                record.target_project_id,
+                conversation_id,
+            )
+        return ChatTarget.conversation(conversation_id)
+
+    async def _verify_accepted_target(
+        self,
+        page: Page,
+        original_target: ChatTarget,
+        conversation_id: str,
+    ) -> ChatTarget:
+        expected = (
+            ChatTarget.project_conversation(original_target.project_id, conversation_id)
+            if original_target.project_id is not None
+            else ChatTarget.conversation(conversation_id)
+        )
+        deadline = time.monotonic() + self.config.identity_timeout
+        while time.monotonic() < deadline:
+            try:
+                observed = ChatTarget.parse(page.url)
+            except InvalidInputError:
+                observed = None
+            if observed == expected:
+                return expected
+            await asyncio.sleep(self.config.poll)
+        raise AmbiguousOutcomeError(
+            "accepted Send did not resolve to the exact target conversation URL"
+        )
+
+    def _require_exact_owner(self, coordination_key: str, request_id: str) -> None:
+        owner = self.coordination.load(coordination_key).active_request_id
         if owner != request_id:
             raise OwnershipConflictError("exact conversation ownership changed before Send")
 
@@ -993,10 +1234,20 @@ class ChatGPTClient:
         raise AmbiguousOutcomeError("helper closure state changed repeatedly")
 
     @staticmethod
-    def _unexpected_send_failure(exc: Exception, *, click_entered: bool) -> Failure:
+    def _unexpected_send_failure(
+        exc: Exception,
+        *,
+        click_entered: bool,
+        attachment_entered: bool,
+    ) -> Failure:
         if click_entered:
             return AmbiguousOutcomeError(
                 "browser operation failed after the irreversible Send boundary: "
+                f"{type(exc).__name__}"
+            ).as_failure()
+        if attachment_entered:
+            return AmbiguousOutcomeError(
+                "browser operation failed after the attachment mutation boundary: "
                 f"{type(exc).__name__}"
             ).as_failure()
         if isinstance(exc, PlaywrightTimeoutError):
@@ -1028,9 +1279,12 @@ class ChatGPTClient:
                 current.send_provenance == SendProvenance.RETRY_PROHIBITED
                 and identity.pre_send_current_node
                 and current.baseline_node_fingerprints
-                and current.target_kind == "conversation"
+                and current.target_kind
+                in {TargetKind.CONVERSATION.value, TargetKind.PROJECT_CONVERSATION.value}
                 and current.target_conversation_id == identity.conversation_id
-                and self.coordination.load(identity.conversation_id).active_request_id
+                and self.coordination.load(
+                    self._coordination_key(current, identity.conversation_id)
+                ).active_request_id
                 == current.request_id
             )
             if not identity.has_transport_correlation and not structural_reconcile:

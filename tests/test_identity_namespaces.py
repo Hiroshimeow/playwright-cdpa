@@ -76,7 +76,7 @@ def test_schema_two_identity_migrates_transport_fields_without_guessing() -> Non
         "sources": {},
     }
     migrated = TurnRecord.from_dict(json.loads(json.dumps(original)))
-    assert migrated.schema_version == 4
+    assert migrated.schema_version == 5
     assert migrated.identity is not None
     assert migrated.identity.transport_turn_exchange_id == "transport-turn"
     assert migrated.identity.transport_request_id == "transport-request"

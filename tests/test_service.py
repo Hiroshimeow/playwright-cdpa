@@ -7,6 +7,7 @@ import pytest
 from playwright_api.config import ClientConfig
 from playwright_api.models import TurnRecord, TurnState
 from playwright_api.service import ChatGPTClient
+from playwright_api.targets import ChatTarget
 
 
 def test_relative_default_home_fails_before_store_construction(tmp_path, monkeypatch) -> None:
@@ -127,7 +128,7 @@ async def test_public_request_id_validation_precedes_state_coordination_and_brow
 
     with pytest.raises(InvalidInputError, match="request_id"):
         if operation == "send":
-            await core.send("prompt", fresh=True, request_id=request_id)
+            await core.send("prompt", target=ChatTarget.fresh(), request_id=request_id)
         elif operation == "get":
             await core.get(request_id)
         elif operation == "status":
@@ -156,7 +157,7 @@ async def test_duplicate_public_request_id_fails_before_browser_access(tmp_path)
     from playwright_api.models import Result
 
     with pytest.raises(OwnershipConflictError) as captured:
-        await core.send("second", fresh=True, request_id="duplicate")
+        await core.send("second", target=ChatTarget.fresh(), request_id="duplicate")
 
     failure = captured.value.as_failure()
     result = Result(1, "duplicate", TurnState.FAILED, failure=failure)
@@ -388,7 +389,7 @@ async def test_pre_click_playwright_failure_releases_claim_and_closes_helper(
     )
     result = await core.send(
         "prompt",
-        conversation="conversation-timeout",
+        target=ChatTarget.conversation("conversation-timeout"),
         request_id="req-timeout",
     )
 
@@ -499,7 +500,7 @@ async def test_preclick_manual_state_preserves_exact_page(
     )
     result = await core.send(
         "prompt",
-        conversation=conversation_id,
+        target=ChatTarget.conversation(conversation_id),
         request_id=f"manual-{page_kind}-{drift}",
     )
     persisted = core.store.load(result.request_id)
@@ -637,7 +638,7 @@ async def test_cancel_race_still_durably_preserves_owned_manual_page(
     monkeypatch.setattr(core.store, "save", save_with_one_retention_conflict)
     send_result = await core.send(
         "prompt",
-        conversation=conversation_id,
+        target=ChatTarget.conversation(conversation_id),
         request_id=request_id,
     )
     before_reads = core.store.load(request_id)
@@ -782,7 +783,7 @@ async def test_preclick_cancel_is_one_atomic_save_under_manual_state_race(
     monkeypatch.setattr(service_module, "observe_frontend", observe)
     send_result = await sender.send(
         "prompt",
-        conversation=conversation_id,
+        target=ChatTarget.conversation(conversation_id),
         request_id=request_id,
     )
     assert cancel_task is not None
@@ -865,7 +866,8 @@ async def test_atomic_send_rejects_same_target_navigation_after_python_preflight
         active_page,
         *,
         prompt,
-        target_conversation_id,
+        target,
+        expected_attachment_names,
         send_timeout,
         on_accepted,
     ):
@@ -877,7 +879,8 @@ async def test_atomic_send_rejects_same_target_navigation_after_python_preflight
         await click_send_atomic(
             active_page,
             prompt,
-            conversation_id=target_conversation_id,
+            target=target,
+            expected_attachment_names=expected_attachment_names,
         )
         raise AssertionError("wrong-conversation Send must not click")
 
@@ -899,7 +902,7 @@ async def test_atomic_send_rejects_same_target_navigation_after_python_preflight
     )
     result = await core.send(
         "prompt",
-        conversation=conversation_id,
+        target=ChatTarget.conversation(conversation_id),
         request_id="atomic-send-request",
     )
 
@@ -1307,12 +1310,14 @@ async def test_frontend_accepted_transient_backend_failure_then_watch_closes_exa
         _page,
         *,
         prompt,
-        target_conversation_id,
+        target,
+        expected_attachment_names,
         send_timeout,
         on_accepted,
     ):
         assert prompt == "prompt"
-        assert target_conversation_id == conversation_id
+        assert target == ChatTarget.conversation(conversation_id)
+        assert expected_attachment_names == {}
         assert send_timeout > 0
         acceptance = FrontendAcceptance(
             200,
@@ -1357,7 +1362,7 @@ async def test_frontend_accepted_transient_backend_failure_then_watch_closes_exa
     )
     first = await core.send(
         "prompt",
-        conversation=conversation_id,
+        target=ChatTarget.conversation(conversation_id),
         request_id="recover-request",
     )
 
@@ -2099,7 +2104,7 @@ async def test_fresh_send_rejects_url_suffix_before_click_boundary(
     )
     result = await core.send(
         "prompt",
-        fresh=True,
+        target=ChatTarget.fresh(),
         request_id=f"fresh-{replacement_kind}-{replacement_phase}",
     )
     persisted = core.store.load(result.request_id)
@@ -2168,12 +2173,14 @@ async def test_send_ignores_noncanonical_conversation_page_before_composer_mutat
         page,
         *,
         prompt,
-        target_conversation_id,
+        target,
+        expected_attachment_names,
         send_timeout,
         on_accepted,
     ):
         assert prompt == "prompt"
-        assert target_conversation_id == conversation_id
+        assert target == ChatTarget.conversation(conversation_id)
+        assert expected_attachment_names == {}
         assert send_timeout > 0
         assert on_accepted is not None
         send_pages.append(page)
@@ -2197,7 +2204,7 @@ async def test_send_ignores_noncanonical_conversation_page_before_composer_mutat
     )
     result = await core.send(
         "prompt",
-        conversation=conversation_id,
+        target=ChatTarget.conversation(conversation_id),
         request_id="send-canonical-request",
     )
 

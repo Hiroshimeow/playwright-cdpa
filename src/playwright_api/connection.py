@@ -26,7 +26,7 @@ from .errors import (
     OperationTimeoutError,
     SchemaDriftError,
 )
-from .targets import conversation_url, normalize_conversation
+from .targets import ChatTarget, TargetKind
 
 
 class BrowserSession:
@@ -98,13 +98,15 @@ async def page_target_id(context: BrowserContext, page: Page) -> str:
     return target_id
 
 
-async def resolve_conversation_page(
+async def resolve_target_page(
     context: BrowserContext,
-    conversation_id: str,
+    target: ChatTarget,
     *,
     preferred_target_id: str | None = None,
 ) -> ConversationPage:
-    """Borrow one exact conversation page or open one exact owned helper."""
+    """Borrow one exact ChatGPT target page or open one exact owned helper."""
+    if target.kind is TargetKind.FRESH:
+        raise InvalidInputError("fresh root targets require a new owned page")
     exact: list[tuple[Page, str]] = []
     preferred: tuple[Page, str] | None = None
     for page in list(context.pages):
@@ -112,20 +114,20 @@ async def resolve_conversation_page(
             continue
         target_id = await page_target_id(context, page)
         try:
-            page_conversation_id = normalize_conversation(page.url)
+            page_target = ChatTarget.parse(page.url)
         except InvalidInputError:
-            page_conversation_id = None
+            page_target = None
         if preferred_target_id is not None and target_id == preferred_target_id:
             preferred = (page, target_id)
-            if page_conversation_id != conversation_id:
+            if page_target != target:
                 raise ConflictingIdentityError(
-                    "persisted helper target is not the exact conversation page"
+                    "persisted helper target is not the exact ChatGPT target page"
                 )
-        if page_conversation_id == conversation_id:
+        if page_target == target:
             exact.append((page, target_id))
 
     if len(exact) > 1:
-        raise ConflictingIdentityError("multiple browser pages matched the exact conversation")
+        raise ConflictingIdentityError("multiple browser pages matched the exact target")
     if preferred is not None:
         return ConversationPage(preferred[0], preferred[1], True)
     if exact:
@@ -135,29 +137,29 @@ async def resolve_conversation_page(
     try:
         page = await context.new_page()
     except PlaywrightTimeoutError as exc:
-        raise OperationTimeoutError("creating an exact conversation page timed out") from exc
+        raise OperationTimeoutError("creating an exact target page timed out") from exc
     except PlaywrightError as exc:
-        raise NetworkError("could not create an exact conversation page") from exc
+        raise NetworkError("could not create an exact target page") from exc
     try:
         target_id = await page_target_id(context, page)
         try:
             await page.goto(
-                conversation_url(conversation_id),
+                target.canonical_url,
                 wait_until="domcontentloaded",
                 timeout=60_000,
             )
         except PlaywrightTimeoutError as exc:
-            raise OperationTimeoutError("exact conversation page navigation timed out") from exc
+            raise OperationTimeoutError("exact target page navigation timed out") from exc
         except PlaywrightError as exc:
-            raise NetworkError("could not navigate to the exact conversation page") from exc
+            raise NetworkError("could not navigate to the exact target page") from exc
         try:
-            resolved_id = normalize_conversation(page.url)
+            resolved = ChatTarget.parse(page.url)
         except InvalidInputError as exc:
             raise ConflictingIdentityError(
-                "new helper did not remain on an exact conversation URL"
+                "new helper did not remain on an exact ChatGPT target URL"
             ) from exc
-        if resolved_id != conversation_id:
-            raise ConflictingIdentityError("new helper resolved to a different conversation")
+        if resolved != target:
+            raise ConflictingIdentityError("new helper resolved to a different target")
         return ConversationPage(page, target_id, True)
     except Exception:
         try:
@@ -165,6 +167,20 @@ async def resolve_conversation_page(
         except PlaywrightError:
             pass
         raise
+
+
+async def resolve_conversation_page(
+    context: BrowserContext,
+    conversation_id: str,
+    *,
+    preferred_target_id: str | None = None,
+) -> ConversationPage:
+    """Compatibility wrapper for the internal ordinary-conversation resolver."""
+    return await resolve_target_page(
+        context,
+        ChatTarget.conversation(conversation_id),
+        preferred_target_id=preferred_target_id,
+    )
 
 
 async def close_page_by_target_id(context: BrowserContext, target_id: str) -> bool:

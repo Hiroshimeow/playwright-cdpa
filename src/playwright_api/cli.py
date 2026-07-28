@@ -5,11 +5,13 @@ import asyncio
 import sys
 from pathlib import Path
 
+from .attachments import AttachmentInput
 from .config import ClientConfig
 from .errors import CoreError, Failure, FailureCategory, InvalidInputError
 from .models import Result, TurnState
 from .redaction import safe_json_dumps
 from .service import ChatGPTClient
+from .targets import ChatTarget
 
 EXIT_SUCCESS = 0
 EXIT_INVALID = 2
@@ -28,7 +30,7 @@ def _shared(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--send-timeout", type=float, default=90.0)
     parser.add_argument("--identity-timeout", type=float, default=30.0)
-    parser.add_argument("--state-dir", default=".playwright-api")
+    parser.add_argument("--state-dir")
     parser.add_argument("--coordination-dir")
     parser.add_argument("--deployment-id")
     parser.add_argument("--json", action="store_true")
@@ -40,9 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     send = sub.add_parser("send", help="send through the real ChatGPT frontend")
     send.add_argument("prompt")
-    target = send.add_mutually_exclusive_group(required=True)
-    target.add_argument("--fresh", action="store_true")
-    target.add_argument("--conversation")
+    send.add_argument(
+        "--target",
+        default="/",
+        help="exact ChatGPT target path or canonical URL; defaults to fresh root",
+    )
+    send.add_argument("--attach", action="append", default=[], metavar="PATH")
     send.add_argument("--request-id")
     _shared(send)
 
@@ -64,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _config(args: argparse.Namespace) -> ClientConfig:
     return ClientConfig(
         cdp_endpoint=args.cdp_endpoint,
-        state_dir=Path(args.state_dir),
+        state_dir=(Path(args.state_dir) if args.state_dir else ClientConfig().state_dir),
         coordination_dir=(Path(args.coordination_dir) if args.coordination_dir else None),
         deployment_id=args.deployment_id,
         timeout=args.timeout,
@@ -79,9 +84,9 @@ async def _run(args: argparse.Namespace) -> Result:
     if args.command == "send":
         return await core.send(
             args.prompt,
-            fresh=args.fresh,
-            conversation=args.conversation,
             request_id=args.request_id,
+            target=ChatTarget.parse(args.target),
+            attachments=tuple(AttachmentInput.from_path(path) for path in args.attach),
         )
     if args.command == "get":
         return await core.get(args.request_id)

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from .attachments import AttachmentInput, snapshot_attachments
 from .errors import Failure
 from .schema import (
     decode_bounded_text,
@@ -17,6 +18,7 @@ from .schema import (
     decode_sha256,
     decode_timestamp,
 )
+from .targets import ChatTarget, TargetKind
 
 
 def utc_now() -> str:
@@ -101,12 +103,20 @@ class TurnState(str, Enum):
 
 class SendProvenance(str, Enum):
     NOT_ATTEMPTED = "NOT_ATTEMPTED"
+    ATTACHMENT_BOUNDARY_ENTERED = "ATTACHMENT_BOUNDARY_ENTERED"
     CLICK_BOUNDARY_ENTERED = "CLICK_BOUNDARY_ENTERED"
     FRONTEND_ACCEPTED = "FRONTEND_ACCEPTED"
     USER_IDENTITY_BOUND = "USER_IDENTITY_BOUND"
     DURABLE_HANDOFF = "DURABLE_HANDOFF"
     SAFE_TO_RETRY = "SAFE_TO_RETRY"
     RETRY_PROHIBITED = "RETRY_PROHIBITED"
+
+
+class AttachmentStage(str, Enum):
+    NOT_REQUIRED = "NOT_REQUIRED"
+    SNAPSHOTTED = "SNAPSHOTTED"
+    UPLOAD_STARTED = "UPLOAD_STARTED"
+    VERIFIED = "VERIFIED"
 
 
 _ALLOWED_TRANSITIONS: dict[TurnState, frozenset[TurnState]] = {
@@ -275,7 +285,10 @@ class TurnRecord:
     prompt_sha256: str
     prompt_length: int
     target_kind: str
+    target_project_id: str | None
     target_conversation_id: str | None
+    attachments: tuple[AttachmentInput, ...]
+    attachment_stage: AttachmentStage
     identity: TurnIdentity | None
     baseline_node_fingerprints: dict[str, str]
     revision: int
@@ -295,29 +308,61 @@ class TurnRecord:
         *,
         request_id: str,
         prompt: str,
-        target_kind: str = "fresh",
+        target: ChatTarget | None = None,
+        attachments: tuple[AttachmentInput, ...] = (),
+        target_kind: str | None = None,
         target_conversation_id: str | None = None,
+        target_project_id: str | None = None,
     ) -> TurnRecord:
-        if target_kind not in {"fresh", "conversation"}:
-            raise ValueError("target_kind must be fresh or conversation")
-        if target_kind == "conversation" and not target_conversation_id:
-            raise ValueError("conversation target requires target_conversation_id")
+        if target is not None and any(
+            value is not None
+            for value in (target_kind, target_conversation_id, target_project_id)
+        ):
+            raise ValueError("target cannot be combined with legacy target fields")
+        if target is None:
+            target = _target_from_fields(
+                target_kind or "fresh",
+                target_project_id,
+                target_conversation_id,
+            )
+        snapshots = snapshot_attachments(attachments)
         now = utc_now()
         return cls(
-            schema_version=4,
+            schema_version=5,
             request_id=request_id,
             state=TurnState.NEW,
             send_provenance=SendProvenance.NOT_ATTEMPTED,
             prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             prompt_length=len(prompt),
-            target_kind=target_kind,
-            target_conversation_id=target_conversation_id,
+            target_kind=target.kind.value,
+            target_project_id=target.project_id,
+            target_conversation_id=target.conversation_id,
+            attachments=snapshots,
+            attachment_stage=(
+                AttachmentStage.SNAPSHOTTED
+                if snapshots
+                else AttachmentStage.NOT_REQUIRED
+            ),
             identity=None,
             baseline_node_fingerprints={},
             revision=0,
             created_at=now,
             updated_at=now,
         )
+
+    @property
+    def target(self) -> ChatTarget:
+        return _target_from_fields(
+            self.target_kind,
+            self.target_project_id,
+            self.target_conversation_id,
+        )
+
+    @property
+    def coordination_key(self) -> str | None:
+        if self.target.kind is TargetKind.PROJECT_CONVERSATION:
+            return self.target.coordination_key
+        return self.target.conversation_id
 
     @property
     def retry_allowed(self) -> bool:
@@ -352,16 +397,35 @@ class TurnRecord:
     def with_send_provenance(self, value: SendProvenance) -> TurnRecord:
         allowed_order = {
             SendProvenance.NOT_ATTEMPTED: 0,
-            SendProvenance.CLICK_BOUNDARY_ENTERED: 1,
-            SendProvenance.FRONTEND_ACCEPTED: 2,
-            SendProvenance.USER_IDENTITY_BOUND: 3,
-            SendProvenance.DURABLE_HANDOFF: 4,
+            SendProvenance.ATTACHMENT_BOUNDARY_ENTERED: 1,
+            SendProvenance.CLICK_BOUNDARY_ENTERED: 2,
+            SendProvenance.FRONTEND_ACCEPTED: 3,
+            SendProvenance.USER_IDENTITY_BOUND: 4,
+            SendProvenance.DURABLE_HANDOFF: 5,
         }
         current_rank = allowed_order.get(self.send_provenance)
         new_rank = allowed_order.get(value)
         if current_rank is not None and new_rank is not None and new_rank < current_rank:
             raise ValueError("send provenance cannot move backwards")
         return replace(self, send_provenance=value, updated_at=utc_now())
+
+    def with_attachment_stage(self, value: AttachmentStage) -> TurnRecord:
+        if not isinstance(value, AttachmentStage):
+            raise ValueError("attachment stage must be an AttachmentStage")
+        if not self.attachments:
+            if value is not AttachmentStage.NOT_REQUIRED:
+                raise ValueError("attachment stage requires durable attachments")
+            return self
+        order = {
+            AttachmentStage.SNAPSHOTTED: 0,
+            AttachmentStage.UPLOAD_STARTED: 1,
+            AttachmentStage.VERIFIED: 2,
+        }
+        current_rank = order.get(self.attachment_stage)
+        new_rank = order.get(value)
+        if current_rank is None or new_rank is None or new_rank < current_rank:
+            raise ValueError("attachment stage cannot move backwards")
+        return replace(self, attachment_stage=value, updated_at=utc_now())
 
     def with_identity(self, identity: TurnIdentity) -> TurnRecord:
         return replace(self, identity=identity, updated_at=utc_now())
@@ -421,14 +485,17 @@ class TurnRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "request_id": self.request_id,
             "state": self.state.value,
             "send_provenance": self.send_provenance.value,
             "prompt_sha256": self.prompt_sha256,
             "prompt_length": self.prompt_length,
             "target_kind": self.target_kind,
+            "target_project_id": self.target_project_id,
             "target_conversation_id": self.target_conversation_id,
+            "attachments": [item.to_durable_dict() for item in self.attachments],
+            "attachment_stage": self.attachment_stage.value,
             "identity": self.identity.to_dict() if self.identity else None,
             "baseline_node_fingerprints": dict(self.baseline_node_fingerprints),
             "revision": self.revision,
@@ -459,10 +526,10 @@ class TurnRecord:
         if type(value) is not dict:
             raise ValueError("turn record must be an object")
         raw_schema = decode_required_int(value.get("schema_version"), "schema_version")
-        if raw_schema not in {2, 3, 4}:
+        if raw_schema not in {2, 3, 4, 5}:
             raise ValueError("unsupported turn record schema")
 
-        known_fields = {
+        base_fields = {
             "schema_version",
             "request_id",
             "state",
@@ -484,14 +551,24 @@ class TurnRecord:
             "helper_page_keep",
             "helper_page_closed_at",
         }
+        v5_fields = {"target_project_id", "attachments", "attachment_stage"}
+        known_fields = base_fields | v5_fields
         unknown = set(value) - known_fields
         if unknown:
             raise ValueError(f"turn record contains unsupported fields: {sorted(unknown)!r}")
-        required = known_fields - {
+        required = base_fields - {
             "helper_page_target_id",
             "helper_page_keep",
             "helper_page_closed_at",
         }
+        if raw_schema >= 4:
+            required |= {
+                "helper_page_target_id",
+                "helper_page_keep",
+                "helper_page_closed_at",
+            }
+        if raw_schema >= 5:
+            required |= v5_fields
         missing = required - set(value)
         if missing:
             raise ValueError(f"turn record is missing fields: {sorted(missing)!r}")
@@ -559,15 +636,36 @@ class TurnRecord:
         state = decode_enum(value["state"], "state", TurnState)
         provenance = decode_enum(value["send_provenance"], "send_provenance", SendProvenance)
         target_kind = decode_identifier(value["target_kind"], "target_kind", max_length=32)
-        if target_kind not in {"fresh", "conversation"}:
-            raise ValueError("target_kind must be fresh or conversation")
+        target_project_id = decode_optional_identifier(
+            value.get("target_project_id"), "target_project_id"
+        )
         target_conversation_id = decode_optional_identifier(
             value["target_conversation_id"], "target_conversation_id"
         )
-        if target_kind == "conversation" and target_conversation_id is None:
-            raise ValueError("conversation target requires target_conversation_id")
-        if target_kind == "fresh" and target_conversation_id is not None:
-            raise ValueError("fresh target must not contain target_conversation_id")
+        target = _target_from_fields(
+            target_kind or "",
+            target_project_id,
+            target_conversation_id,
+        )
+
+        raw_attachments = value.get("attachments", [])
+        if type(raw_attachments) is not list:
+            raise ValueError("attachments must be an array")
+        attachments = tuple(AttachmentInput.from_durable_dict(item) for item in raw_attachments)
+        if value.get("attachment_stage") is None:
+            attachment_stage = (
+                AttachmentStage.SNAPSHOTTED
+                if attachments
+                else AttachmentStage.NOT_REQUIRED
+            )
+        else:
+            attachment_stage = decode_enum(
+                value["attachment_stage"], "attachment_stage", AttachmentStage
+            )
+        if attachments and attachment_stage is AttachmentStage.NOT_REQUIRED:
+            raise ValueError("durable attachments require an attachment stage")
+        if not attachments and attachment_stage is not AttachmentStage.NOT_REQUIRED:
+            raise ValueError("attachment stage without durable attachments")
 
         response_sha256 = decode_sha256(
             value["response_sha256"], "response_sha256", optional=True
@@ -593,6 +691,7 @@ class TurnRecord:
             TurnState.NEW: {SendProvenance.NOT_ATTEMPTED},
             TurnState.PREPARING: {
                 SendProvenance.NOT_ATTEMPTED,
+                SendProvenance.ATTACHMENT_BOUNDARY_ENTERED,
                 SendProvenance.CLICK_BOUNDARY_ENTERED,
             },
             TurnState.SENT: {SendProvenance.FRONTEND_ACCEPTED},
@@ -618,10 +717,10 @@ class TurnRecord:
 
         identity = TurnIdentity.from_dict(raw_identity)
         if (
-            target_conversation_id is not None
+            target.conversation_id is not None
             and identity is not None
             and identity.conversation_id is not None
-            and identity.conversation_id != target_conversation_id
+            and identity.conversation_id != target.conversation_id
         ):
             raise ValueError("target and identity conversation IDs conflict")
 
@@ -629,14 +728,17 @@ class TurnRecord:
             value, raw_schema
         )
         return cls(
-            schema_version=4,
+            schema_version=5,
             request_id=decode_identifier(value["request_id"], "request_id") or "",
             state=state,
             send_provenance=provenance,
             prompt_sha256=decode_sha256(value["prompt_sha256"], "prompt_sha256") or "",
             prompt_length=decode_required_int(value["prompt_length"], "prompt_length"),
-            target_kind=target_kind,
-            target_conversation_id=target_conversation_id,
+            target_kind=target.kind.value,
+            target_project_id=target.project_id,
+            target_conversation_id=target.conversation_id,
+            attachments=attachments,
+            attachment_stage=attachment_stage,
             identity=identity,
             baseline_node_fingerprints=baseline,
             revision=decode_required_int(value["revision"], "revision"),
@@ -654,6 +756,32 @@ class TurnRecord:
             helper_page_keep=helper_keep,
             helper_page_closed_at=helper_closed_at,
         )
+
+
+def _target_from_fields(
+    target_kind: str,
+    target_project_id: str | None,
+    target_conversation_id: str | None,
+) -> ChatTarget:
+    try:
+        kind = TargetKind(target_kind)
+    except ValueError as exc:
+        raise ValueError("unsupported target kind") from exc
+    if kind is TargetKind.FRESH:
+        if target_project_id is not None or target_conversation_id is not None:
+            raise ValueError("fresh target cannot contain project or conversation identity")
+        return ChatTarget.fresh()
+    if kind is TargetKind.CONVERSATION:
+        if target_project_id is not None or target_conversation_id is None:
+            raise ValueError("conversation target requires only conversation identity")
+        return ChatTarget.conversation(target_conversation_id)
+    if kind is TargetKind.PROJECT:
+        if target_project_id is None or target_conversation_id is not None:
+            raise ValueError("project target requires only project identity")
+        return ChatTarget.project(target_project_id)
+    if target_project_id is None or target_conversation_id is None:
+        raise ValueError("project conversation target requires both identities")
+    return ChatTarget.project_conversation(target_project_id, target_conversation_id)
 
 
 @dataclass(frozen=True, slots=True)

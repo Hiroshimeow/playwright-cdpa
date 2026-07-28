@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import time
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from .attachments import AttachmentInput, validate_attachments_unchanged
 from .errors import (
     AuthenticationRequiredError,
     CancellationUnprovenError,
@@ -14,6 +17,8 @@ from .errors import (
     NetworkError,
     OperationTimeoutError,
 )
+from .projects import ProjectMemoryScope, ProjectRef
+from .targets import ChatTarget, TargetKind
 
 ORIGIN = "https://chatgpt.com"
 
@@ -122,24 +127,229 @@ async def observe_frontend(page: Page) -> FrontendState:
     )
 
 
+async def list_projects_frontend(page: Page) -> tuple[ProjectRef, ...]:
+    try:
+        await page.goto(f"{ORIGIN}/projects", wait_until="domcontentloaded", timeout=60_000)
+        raw = await page.evaluate(
+            """() => {
+              const visible = (element) => Boolean(element && element.getClientRects().length &&
+                getComputedStyle(element).visibility !== 'hidden');
+              return [...document.querySelectorAll('a[href^="/g/g-p-"][href$="/project"]')]
+                .filter(visible)
+                .map((anchor) => {
+                  const card = anchor.closest('article,[role="listitem"],[data-testid*="project"]') || anchor;
+                  const name = String(
+                    anchor.getAttribute('aria-label') ||
+                    card.querySelector('h1,h2,h3,[data-testid*="name"]')?.textContent ||
+                    anchor.textContent || ''
+                  ).trim();
+                  const text = String(card.textContent || '');
+                  return {
+                    href: anchor.href,
+                    name,
+                    memory_scope: /project[- ]only memory/i.test(text)
+                      ? 'project_only' : 'default',
+                  };
+                });
+            }"""
+        )
+    except PlaywrightTimeoutError as exc:
+        raise OperationTimeoutError("project list navigation timed out") from exc
+    except PlaywrightError as exc:
+        raise NetworkError("could not inspect ChatGPT projects") from exc
+    if not isinstance(raw, list):
+        raise FrontendNotReadyError("project list response is malformed")
+    projects: list[ProjectRef] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise FrontendNotReadyError("project list item is malformed")
+        try:
+            target = ChatTarget.parse(str(item.get("href") or ""))
+            if target.kind is not TargetKind.PROJECT or target.project_id is None:
+                raise ValueError("not a project root")
+            projects.append(
+                ProjectRef(
+                    project_id=target.project_id,
+                    canonical_url=target.canonical_url,
+                    name=str(item.get("name") or ""),
+                    memory_scope=ProjectMemoryScope(str(item.get("memory_scope") or "default")),
+                )
+            )
+        except (ValueError, TypeError) as exc:
+            raise FrontendNotReadyError("project identity could not be proven") from exc
+    return tuple(projects)
+
+
+async def create_project_frontend(
+    page: Page,
+    *,
+    name: str,
+    memory_scope: ProjectMemoryScope,
+) -> ProjectRef:
+    try:
+        await page.goto(f"{ORIGIN}/projects", wait_until="domcontentloaded", timeout=60_000)
+        create_control = await _find_visible(
+            page,
+            (
+                'button[data-testid="create-project-button"]',
+                'button[aria-label="New project"]',
+                'button[aria-label="Create project"]',
+            ),
+            "Create project control",
+            5_000,
+        )
+        await create_control.click()
+        name_input = await _find_visible(
+            page,
+            (
+                '[role="dialog"] input[name="name"]',
+                '[role="dialog"] input[placeholder*="project name" i]',
+                'input[data-testid="project-name-input"]',
+            ),
+            "project name input",
+            5_000,
+        )
+        await name_input.fill(name)
+        if memory_scope is ProjectMemoryScope.PROJECT_ONLY:
+            option = page.get_by_text("Project-only memory", exact=False).first
+            await option.click(timeout=5_000)
+        submit = await _find_visible(
+            page,
+            (
+                '[role="dialog"] button[data-testid="create-project-button"]',
+                '[role="dialog"] button[type="submit"]',
+                '[role="dialog"] button[aria-label="Create project"]',
+            ),
+            "project creation submit control",
+            5_000,
+        )
+        await submit.click()
+        await page.wait_for_url("**/g/g-p-*/project", timeout=60_000)
+    except PlaywrightTimeoutError as exc:
+        raise OperationTimeoutError("project creation outcome is unknown") from exc
+    except PlaywrightError as exc:
+        raise NetworkError("project creation frontend flow failed") from exc
+    try:
+        target = ChatTarget.parse(page.url)
+    except Exception as exc:
+        raise FrontendNotReadyError("created project URL could not be proven") from exc
+    if target.kind is not TargetKind.PROJECT or target.project_id is None:
+        raise FrontendNotReadyError("created project did not resolve to an exact project root")
+    return ProjectRef(
+        project_id=target.project_id,
+        canonical_url=target.canonical_url,
+        name=name,
+        memory_scope=memory_scope,
+    )
+
+
+async def attachment_names(page: Page) -> tuple[str, ...]:
+    try:
+        raw = await page.evaluate(
+            """() => {
+              const visible = (element) => Boolean(element && element.getClientRects().length &&
+                getComputedStyle(element).visibility !== 'hidden');
+              const composer = [...document.querySelectorAll(
+                'div[role="textbox"][contenteditable="true"], ' +
+                '[contenteditable="true"][data-lexical-editor="true"], ' +
+                'textarea[data-testid="prompt-textarea"], #prompt-textarea'
+              )].find(visible) || null;
+              const host = composer?.closest('form') ||
+                composer?.closest('[data-testid="composer"]') || null;
+              if (!host) return [];
+              const selector = '[data-filename], [data-file-name], ' +
+                '[data-testid*="attachment"], [data-testid*="file"]';
+              return [...host.querySelectorAll(selector)]
+                .filter((element) => visible(element) &&
+                  !element.parentElement?.closest(selector))
+                .map((element) => String(
+                  element.getAttribute('data-filename') ||
+                  element.getAttribute('data-file-name') ||
+                  element.getAttribute('aria-label') ||
+                  element.textContent || ''
+                ).trim())
+                .filter(Boolean);
+            }"""
+        )
+    except Exception as exc:
+        raise FrontendNotReadyError("could not inspect attachment identity") from exc
+    if not isinstance(raw, list) or any(type(item) is not str or not item for item in raw):
+        raise FrontendNotReadyError("attachment identity response is malformed")
+    return tuple(raw)
+
+
+async def upload_attachments(
+    page: Page,
+    attachments: Sequence[AttachmentInput],
+    *,
+    timeout: float = 60.0,
+) -> None:
+    expected = tuple(attachments)
+    if not expected:
+        return
+    validate_attachments_unchanged(expected)
+    inputs = page.locator('input[type="file"]')
+    count = await inputs.count()
+    if count == 0:
+        opened = False
+        for selector in (
+            'button[data-testid="composer-plus-btn"]',
+            'button[aria-label="Attach files"]',
+            'button[aria-label="Upload files"]',
+            'button[aria-label^="Add files"]',
+        ):
+            control = page.locator(selector).first
+            try:
+                await control.click(timeout=2_000)
+                opened = True
+                break
+            except (PlaywrightError, PlaywrightTimeoutError):
+                continue
+        if not opened:
+            raise FrontendNotReadyError("could not open the ChatGPT attachment menu")
+        inputs = page.locator('input[type="file"]')
+        count = await inputs.count()
+    if count != 1:
+        raise FrontendNotReadyError("could not identify one exact ChatGPT file input")
+    try:
+        await inputs.first.set_input_files([str(item.path) for item in expected])
+    except PlaywrightTimeoutError as exc:
+        raise OperationTimeoutError("attachment upload invocation timed out") from exc
+    except PlaywrightError as exc:
+        raise NetworkError("attachment upload invocation failed") from exc
+
+    expected_names = Counter(item.path.name for item in expected)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        observed = Counter(await attachment_names(page))
+        if observed == expected_names:
+            return
+        if observed and any(observed[name] > expected_names[name] for name in observed):
+            raise FrontendNotReadyError("unexpected or duplicate attachment identity appeared")
+        await page.wait_for_timeout(200)
+    raise FrontendNotReadyError("exact attachment identity was not proven after upload")
+
+
 async def click_send_atomic(
     page: Page,
     prompt: str,
     *,
-    conversation_id: str | None,
+    target: ChatTarget,
+    expected_attachment_names: Counter[str] | dict[str, int] | None = None,
 ) -> None:
-    """Revalidate the exact page/composer and click one enabled real Send button."""
+    """Revalidate the exact target, composer, attachments, then click Send once."""
+    expected_names = Counter(expected_attachment_names or {})
+    target_path = target.canonical_url.removeprefix(ORIGIN)
     try:
         result = await page.evaluate(
-            """({prompt: expectedPrompt, conversation_id: expectedConversationId}) => {
+            """({prompt: expectedPrompt, target_path: expectedPath,
+                    attachment_names: expectedAttachmentNames}) => {
               const current = new URL(window.location.href);
               const exactOrigin = current.protocol === 'https:' &&
                 ['chatgpt.com', 'www.chatgpt.com'].includes(current.hostname.toLowerCase()) &&
                 !current.username && !current.password &&
                 (current.port === '' || current.port === '443');
-              const exactPath = expectedConversationId === null
-                ? current.pathname === '/'
-                : current.pathname === `/c/${expectedConversationId}`;
+              const exactPath = current.pathname === expectedPath;
               const exactSuffix = current.search === '' && current.hash === '';
               if (!exactOrigin || !exactPath || !exactSuffix) {
                 return {ok: false, reason: 'page_identity'};
@@ -164,11 +374,24 @@ async def click_send_atomic(
               }
               const host = composer.closest('form') ||
                 composer.closest('[data-testid="composer"]') || null;
-              const attachments = host ? [...host.querySelectorAll(
-                '[data-filename], [data-file-name], ' +
-                '[data-testid*="attachment"], [data-testid*="file"]'
-              )].filter(visible) : [];
-              if (attachments.length) {
+              const selector = '[data-filename], [data-file-name], ' +
+                '[data-testid*="attachment"], [data-testid*="file"]';
+              const names = host ? [...host.querySelectorAll(selector)]
+                .filter((element) => visible(element) &&
+                  !element.parentElement?.closest(selector))
+                .map((element) => String(
+                  element.getAttribute('data-filename') ||
+                  element.getAttribute('data-file-name') ||
+                  element.getAttribute('aria-label') ||
+                  element.textContent || ''
+                ).trim())
+                .filter(Boolean) : [];
+              const observed = Object.create(null);
+              for (const name of names) observed[name] = (observed[name] || 0) + 1;
+              const expectedKeys = Object.keys(expectedAttachmentNames).sort();
+              const observedKeys = Object.keys(observed).sort();
+              if (JSON.stringify(expectedKeys) !== JSON.stringify(observedKeys) ||
+                  expectedKeys.some((name) => observed[name] !== expectedAttachmentNames[name])) {
                 return {ok: false, reason: 'attachments_changed'};
               }
               const sends = [...document.querySelectorAll(
@@ -180,7 +403,11 @@ async def click_send_atomic(
               sends[0].click();
               return {ok: true};
             }""",
-            {"prompt": prompt, "conversation_id": conversation_id},
+            {
+                "prompt": prompt,
+                "target_path": target_path,
+                "attachment_names": dict(expected_names),
+            },
         )
     except Exception as exc:
         raise FrontendNotReadyError("could not dispatch the exact Send control") from exc

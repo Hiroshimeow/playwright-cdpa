@@ -191,7 +191,7 @@ def test_schema_three_ignores_untrusted_helper_fields(tmp_path) -> None:
 
     loaded = store.load("schema-three")
 
-    assert loaded.schema_version == 4
+    assert loaded.schema_version == 5
     assert loaded.helper_page_target_id is None
     assert loaded.helper_page_keep is False
     assert loaded.helper_page_closed_at is None
