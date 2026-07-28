@@ -70,6 +70,12 @@ def test_sync_client_delegates_without_browser_logic(monkeypatch) -> None:
 async def test_sync_client_fails_inside_running_event_loop() -> None:
     from playwright_api import SyncChatGPTClient
 
+    client = SyncChatGPTClient()
     with pytest.raises(RuntimeError, match="running event loop"):
-        SyncChatGPTClient().status("request-1")
+        client.status("request-1")
+
+    awaitable = client._client.get("request-1")
+    with pytest.raises(RuntimeError, match="running event loop"):
+        client._run(awaitable)
+    assert getattr(awaitable, "cr_frame", None) is None
     await asyncio.sleep(0)

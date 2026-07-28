@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+from playwright_api import ProjectMemoryScope
+from playwright_api.errors import ConflictingIdentityError
+from playwright_api.frontend import create_project_frontend, find_project_frontend
+
+
+class FakeLocator:
+    def __init__(self, *, visible: bool, page: "FakePage", kind: str = "") -> None:
+        self.visible = visible
+        self.page = page
+        self.kind = kind
+
+    @property
+    def first(self) -> "FakeLocator":
+        return self
+
+    async def wait_for(self, *, state: str, timeout: int) -> None:
+        assert state == "visible"
+        assert timeout > 0
+        if not self.visible:
+            raise PlaywrightTimeoutError("not visible")
+
+    async def evaluate(self, script: str) -> None:
+        assert script == "element => element.click()"
+        if self.kind == "open":
+            self.page.modal_open = True
+        elif self.kind == "submit":
+            assert self.page.boundary_entered is True
+            self.page.submitted = True
+
+    async def fill(self, value: str) -> None:
+        assert self.kind == "name"
+        self.page.name = value
+
+
+class FakePage:
+    def __init__(self) -> None:
+        self.url = "https://chatgpt.com/projects"
+        self.modal_open = False
+        self.boundary_entered = False
+        self.submitted = False
+        self.name = ""
+
+    async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        assert url == "https://chatgpt.com/projects"
+        assert wait_until == "domcontentloaded"
+        assert timeout == 60_000
+
+    def locator(self, selector: str) -> FakeLocator:
+        if selector == 'button[aria-label="New project"]':
+            return FakeLocator(visible=True, page=self, kind="open")
+        if selector == 'form[data-testid="create-new-project-form"] input[name="projectName"]':
+            return FakeLocator(visible=self.modal_open, page=self, kind="name")
+        if selector == 'form[data-testid="create-new-project-form"] button[type="submit"]':
+            return FakeLocator(visible=self.modal_open, page=self, kind="submit")
+        return FakeLocator(visible=False, page=self)
+
+    async def wait_for_url(self, pattern: str, *, timeout: int) -> None:
+        assert pattern == "**/g/g-p-*/project"
+        assert timeout == 60_000
+        assert self.submitted is True
+        self.url = "https://chatgpt.com/g/g-p-project123/project"
+
+
+@pytest.mark.asyncio
+async def test_create_project_uses_current_stable_form_contract_and_marks_boundary() -> None:
+    page = FakePage()
+
+    def on_boundary() -> None:
+        assert page.name == "Task Project"
+        page.boundary_entered = True
+
+    project = await create_project_frontend(
+        page,  # type: ignore[arg-type]
+        name="Task Project",
+        memory_scope=ProjectMemoryScope.DEFAULT,
+        on_create_boundary=on_boundary,
+    )
+
+    assert project.project_id == "g-p-project123"
+    assert project.name == "Task Project"
+    assert page.boundary_entered is True
+    assert page.submitted is True
+
+
+class LookupLocator:
+    def __init__(self, page: "LookupPage", kind: str, *, visible: bool = True) -> None:
+        self.page = page
+        self.kind = kind
+        self.visible = visible
+
+    @property
+    def first(self) -> "LookupLocator":
+        return self
+
+    async def wait_for(self, *, state: str, timeout: int) -> None:
+        assert state == "visible"
+        assert timeout > 0
+        if not self.visible:
+            raise PlaywrightTimeoutError("not visible")
+
+    async def inner_text(self) -> str:
+        assert self.kind == "title"
+        return self.page.project_name
+
+    async def evaluate(self, script: str):
+        if self.kind == "details":
+            assert script == "element => element.click()"
+            self.page.details_open = True
+            return None
+        if self.kind == "settings":
+            assert script == "element => element.click()"
+            assert self.page.details_open is True
+            self.page.settings_open = True
+            return None
+        if self.kind == "form":
+            assert "memory_scope" in script
+            return {
+                "name": self.page.project_name,
+                "memory_scope": self.page.memory_scope.value,
+            }
+        raise AssertionError(f"unexpected evaluate on {self.kind}")
+
+
+class LookupPage:
+    def __init__(
+        self,
+        *,
+        row_count: int = 1,
+        project_name: str = "Task Project",
+        memory_scope: ProjectMemoryScope = ProjectMemoryScope.DEFAULT,
+    ) -> None:
+        self.project_id = "g-p-0123456789abcdef0123456789abcdef"
+        self.url = "https://chatgpt.com/projects"
+        self.row_count = row_count
+        self.project_name = project_name
+        self.memory_scope = memory_scope
+        self.details_open = False
+        self.settings_open = False
+
+    async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        assert wait_until == "domcontentloaded"
+        assert timeout == 60_000
+        self.url = url
+
+    async def evaluate(self, script: str, name: str | None = None):
+        assert 'data-page-table-selectable-row="true"' in script
+        if name is None:
+            return self.row_count
+        assert name == "Task Project"
+        if self.row_count == 1:
+            self.url = (
+                f"https://chatgpt.com/g/{self.project_id}-task-project/project"
+            )
+        return {"count": self.row_count}
+
+    async def wait_for_timeout(self, _milliseconds: int) -> None:
+        return None
+
+    async def wait_for_url(self, pattern: str, *, timeout: int) -> None:
+        assert pattern == "**/g/g-p-*/project"
+        assert timeout == 60_000
+
+    def locator(self, selector: str) -> LookupLocator:
+        if selector == '[role="grid"][aria-label="Projects"]':
+            return LookupLocator(self, "grid")
+        if selector == 'button[name="project-title"]:visible':
+            return LookupLocator(self, "title")
+        if selector == 'button[aria-label="Show project details"]:visible':
+            return LookupLocator(self, "details")
+        if selector == 'form[aria-label="Project settings"]':
+            return LookupLocator(self, "form", visible=self.settings_open)
+        return LookupLocator(self, "unknown", visible=False)
+
+    def get_by_text(self, text: str, *, exact: bool) -> LookupLocator:
+        assert text == "Project settings"
+        assert exact is True
+        return LookupLocator(self, "settings", visible=self.details_open)
+
+
+@pytest.mark.asyncio
+async def test_find_project_uses_exact_owned_row_and_proves_metadata() -> None:
+    page = LookupPage(memory_scope=ProjectMemoryScope.PROJECT_ONLY)
+
+    project = await find_project_frontend(
+        page,  # type: ignore[arg-type]
+        name="Task Project",
+    )
+
+    assert project is not None
+    assert project.project_id == page.project_id
+    assert project.name == "Task Project"
+    assert project.memory_scope is ProjectMemoryScope.PROJECT_ONLY
+    assert project.canonical_url == f"https://chatgpt.com/g/{page.project_id}/project"
+
+
+@pytest.mark.asyncio
+async def test_find_project_fails_closed_on_duplicate_exact_rows() -> None:
+    page = LookupPage(row_count=2)
+
+    with pytest.raises(ConflictingIdentityError, match="multiple"):
+        await find_project_frontend(
+            page,  # type: ignore[arg-type]
+            name="Task Project",
+        )
+
+
+@pytest.mark.asyncio
+async def test_find_project_by_id_verifies_title_and_memory_scope() -> None:
+    page = LookupPage()
+
+    project = await find_project_frontend(
+        page,  # type: ignore[arg-type]
+        project_id=page.project_id,
+    )
+
+    assert project is not None
+    assert project.project_id == page.project_id
+    assert project.name == "Task Project"
+    assert project.memory_scope is ProjectMemoryScope.DEFAULT

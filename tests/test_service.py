@@ -408,6 +408,98 @@ async def test_pre_click_playwright_failure_releases_claim_and_closes_helper(
 
 
 @pytest.mark.asyncio
+async def test_attachment_preflight_failure_releases_claim_without_marking_mutation(
+    tmp_path, monkeypatch
+) -> None:
+    import playwright_api.service as service_module
+    from playwright_api import AttachmentInput
+    from playwright_api.errors import FrontendNotReadyError
+    from playwright_api.frontend import FrontendState
+    from playwright_api.models import AttachmentStage, SendProvenance
+    from playwright_api.monitor import MonitorSnapshot
+
+    conversation_id = "attachment-preflight"
+    created = _FakePage("created-target")
+    borrowed = _FakePage(
+        "borrowed-target",
+        url=f"https://chatgpt.com/c/{conversation_id}",
+    )
+    _FakeBrowserSession.context_value = _FakeContext(created, [borrowed])
+
+    class Backend:
+        def __init__(self, _context) -> None:
+            pass
+
+        async def snapshot(self, _conversation_id: str):
+            return MonitorSnapshot("RUNNING", {"mapping": {}, "current_node": None})
+
+    async def noop(*_args, **_kwargs) -> None:
+        return None
+
+    async def observe(page):
+        return FrontendState(
+            url=page.url,
+            composer_present=True,
+            composer_editable=True,
+            composer_text="",
+            attachment_count=0,
+            send_visible=False,
+            send_enabled=False,
+            stop_visible=False,
+            choice_prompt=False,
+        )
+
+    async def upload(
+        _page,
+        _attachments,
+        *,
+        timeout: float,
+        on_upload_boundary,
+    ) -> None:
+        assert timeout > 0
+        assert callable(on_upload_boundary)
+        raise FrontendNotReadyError("could not identify one exact ChatGPT file input")
+
+    async def forbidden_fill(*_args, **_kwargs) -> None:
+        raise AssertionError("upload preflight failure must precede composer mutation")
+
+    monkeypatch.setattr(service_module, "BrowserSession", _FakeBrowserSession)
+    monkeypatch.setattr(service_module, "AuthenticatedBackend", Backend)
+    monkeypatch.setattr(service_module, "verify_authenticated", noop)
+    monkeypatch.setattr(service_module, "observe_frontend", observe)
+    monkeypatch.setattr(service_module, "upload_attachments", upload)
+    monkeypatch.setattr(service_module, "fill_composer", forbidden_fill)
+
+    path = tmp_path / "evidence.txt"
+    path.write_text("evidence", encoding="utf-8")
+    core = ChatGPTClient(
+        ClientConfig(
+            state_dir=tmp_path / "state",
+            coordination_dir=tmp_path / "coordination",
+            deployment_id="attachment-preflight",
+            poll=0.001,
+            timeout=0.05,
+        )
+    )
+
+    result = await core.send(
+        "prompt",
+        request_id="attachment-preflight",
+        target=ChatTarget.conversation(conversation_id),
+        attachments=(AttachmentInput.from_path(path),),
+    )
+    persisted = core.store.load(result.request_id)
+
+    assert result.state is TurnState.FAILED
+    assert result.failure is not None
+    assert result.failure.category.value == "frontend_not_ready"
+    assert persisted.send_provenance is SendProvenance.NOT_ATTEMPTED
+    assert persisted.attachment_stage is AttachmentStage.SNAPSHOTTED
+    assert core.coordination.load(conversation_id).active_request_id is None
+    assert borrowed.closed is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("page_kind", ["owned", "borrowed"])
 @pytest.mark.parametrize("drift", ["text", "attachment"])
 async def test_preclick_manual_state_preserves_exact_page(

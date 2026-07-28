@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from playwright.async_api import Error as PlaywrightError
@@ -13,6 +13,7 @@ from .attachments import AttachmentInput, validate_attachments_unchanged
 from .errors import (
     AuthenticationRequiredError,
     CancellationUnprovenError,
+    ConflictingIdentityError,
     FrontendNotReadyError,
     NetworkError,
     OperationTimeoutError,
@@ -57,6 +58,12 @@ class FrontendState:
         return self.send_visible and self.send_enabled
 
 
+@dataclass(frozen=True, slots=True)
+class AttachmentState:
+    names: tuple[str, ...]
+    pending: bool
+
+
 async def observe_frontend(page: Page) -> FrontendState:
     try:
         raw = await page.evaluate(
@@ -80,10 +87,14 @@ async def observe_frontend(page: Page) -> FrontendState:
                 'button[data-testid="stop-button"], ' +
                 'button[aria-label="Stop generating"], button[aria-label^="Stop"]'
               );
-              const attachments = host ? [...host.querySelectorAll(
-                '[data-filename], [data-file-name], ' +
-                '[data-testid*="attachment"], [data-testid*="file"]'
-              )].filter(visible) : [];
+              const fileTiles = host ? [...host.querySelectorAll('[role="group"][aria-label]')]
+                .filter((element) => visible(element) &&
+                  element.querySelector('button[aria-label^="Remove file "]')) : [];
+              const legacyAttachments = host ? [...host.querySelectorAll(
+                '[data-filename], [data-file-name]'
+              )].filter((element) => visible(element) &&
+                !element.parentElement?.closest('[data-filename], [data-file-name]')) : [];
+              const attachments = fileTiles.length ? fileTiles : legacyAttachments;
               const enabled = Boolean(send && !send.disabled &&
                 send.getAttribute('aria-disabled') !== 'true');
               const choicePrompt = !composer && [
@@ -127,57 +138,151 @@ async def observe_frontend(page: Page) -> FrontendState:
     )
 
 
-async def list_projects_frontend(page: Page) -> tuple[ProjectRef, ...]:
+async def find_project_frontend(
+    page: Page,
+    *,
+    project_id: str | None = None,
+    name: str | None = None,
+) -> ProjectRef | None:
+    if project_id is None and name is None:
+        raise ValueError("project_id or name is required")
+    expected_target = ChatTarget.project(project_id) if project_id is not None else None
     try:
-        await page.goto(f"{ORIGIN}/projects", wait_until="domcontentloaded", timeout=60_000)
-        raw = await page.evaluate(
-            """() => {
-              const visible = (element) => Boolean(element && element.getClientRects().length &&
-                getComputedStyle(element).visibility !== 'hidden');
-              return [...document.querySelectorAll('a[href^="/g/g-p-"][href$="/project"]')]
-                .filter(visible)
-                .map((anchor) => {
-                  const card = anchor.closest('article,[role="listitem"],[data-testid*="project"]') || anchor;
-                  const name = String(
-                    anchor.getAttribute('aria-label') ||
-                    card.querySelector('h1,h2,h3,[data-testid*="name"]')?.textContent ||
-                    anchor.textContent || ''
-                  ).trim();
-                  const text = String(card.textContent || '');
-                  return {
-                    href: anchor.href,
-                    name,
-                    memory_scope: /project[- ]only memory/i.test(text)
-                      ? 'project_only' : 'default',
-                  };
-                });
+        if expected_target is not None:
+            await page.goto(
+                expected_target.canonical_url,
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+            try:
+                observed_target = ChatTarget.parse(page.url)
+            except Exception:
+                return None
+            if observed_target != expected_target:
+                return None
+        else:
+            assert name is not None
+            await page.goto(f"{ORIGIN}/projects", wait_until="domcontentloaded", timeout=60_000)
+            grid = page.locator('[role="grid"][aria-label="Projects"]').first
+            await grid.wait_for(state="visible", timeout=10_000)
+            readiness_deadline = time.monotonic() + 5.0
+            while time.monotonic() < readiness_deadline:
+                row_count = await page.evaluate(
+                    """() => {
+                      const grid = document.querySelector('[role="grid"][aria-label="Projects"]');
+                      return grid ? grid.querySelectorAll(
+                        '[role="row"][data-page-table-selectable-row="true"]'
+                      ).length : 0;
+                    }"""
+                )
+                if type(row_count) is not int:
+                    raise FrontendNotReadyError("project directory readiness is malformed")
+                if row_count > 0:
+                    break
+                await page.wait_for_timeout(250)
+            selection = await page.evaluate(
+                """expectedName => {
+                  const visible = (element) => Boolean(element && element.getClientRects().length &&
+                    getComputedStyle(element).visibility !== 'hidden');
+                  const grid = [...document.querySelectorAll('[role="grid"][aria-label="Projects"]')]
+                    .find(visible);
+                  if (!grid) return {count: null};
+                  const rows = [...grid.querySelectorAll(
+                    '[role="row"][data-page-table-selectable-row="true"]'
+                  )].filter(visible);
+                  const matches = rows.filter((row) => [...row.querySelectorAll('div,span')]
+                    .filter((element) => visible(element) && element.children.length === 0)
+                    .some((element) => String(element.textContent || '').trim() === expectedName));
+                  if (matches.length === 1) matches[0].click();
+                  return {count: matches.length};
+                }""",
+                name,
+            )
+            if not isinstance(selection, dict) or type(selection.get("count")) is not int:
+                raise FrontendNotReadyError("project row selection response is malformed")
+            count = selection["count"]
+            if count == 0:
+                return None
+            if count != 1:
+                raise ConflictingIdentityError("multiple exact projects matched")
+            await page.wait_for_url("**/g/g-p-*/project", timeout=60_000)
+            try:
+                observed_target = ChatTarget.parse(page.url)
+            except Exception as exc:
+                raise FrontendNotReadyError(
+                    "selected project did not resolve to an exact project URL"
+                ) from exc
+            if observed_target.kind is not TargetKind.PROJECT:
+                raise FrontendNotReadyError(
+                    "selected project did not resolve to an exact project root"
+                )
+
+        title = await _find_visible(
+            page,
+            ('button[name="project-title"]:visible',),
+            "project title",
+            5_000,
+        )
+        observed_name = str(await title.inner_text()).strip()
+        if not observed_name:
+            raise FrontendNotReadyError("project title is empty")
+        if name is not None and observed_name != name:
+            return None
+
+        details = await _find_visible(
+            page,
+            ('button[aria-label="Show project details"]:visible',),
+            "project details control",
+            5_000,
+        )
+        await details.evaluate("element => element.click()")
+        settings = page.get_by_text("Project settings", exact=True).first
+        await settings.wait_for(state="visible", timeout=5_000)
+        await settings.evaluate("element => element.click()")
+        form = page.locator('form[aria-label="Project settings"]').first
+        await form.wait_for(state="visible", timeout=5_000)
+        metadata = await form.evaluate(
+            """form => {
+              const projectName = String(
+                form.querySelector('#project-name')?.value ||
+                form.querySelector('input[aria-label="Project name"]')?.value || ''
+              ).trim();
+              const memorySection = [...form.querySelectorAll('section')].find((section) =>
+                [...section.querySelectorAll('label')].some((label) =>
+                  String(label.textContent || '').trim() === 'Memory'
+                )
+              );
+              const memoryValue = String(
+                memorySection?.querySelector('span')?.textContent || ''
+              ).trim();
+              let memoryScope = null;
+              if (memoryValue === 'Project-only') memoryScope = 'project_only';
+              else if (memoryValue === 'Default') memoryScope = 'default';
+              return {name: projectName, memory_scope: memoryScope};
             }"""
         )
     except PlaywrightTimeoutError as exc:
-        raise OperationTimeoutError("project list navigation timed out") from exc
+        raise FrontendNotReadyError("project identity controls did not become available") from exc
     except PlaywrightError as exc:
-        raise NetworkError("could not inspect ChatGPT projects") from exc
-    if not isinstance(raw, list):
-        raise FrontendNotReadyError("project list response is malformed")
-    projects: list[ProjectRef] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            raise FrontendNotReadyError("project list item is malformed")
-        try:
-            target = ChatTarget.parse(str(item.get("href") or ""))
-            if target.kind is not TargetKind.PROJECT or target.project_id is None:
-                raise ValueError("not a project root")
-            projects.append(
-                ProjectRef(
-                    project_id=target.project_id,
-                    canonical_url=target.canonical_url,
-                    name=str(item.get("name") or ""),
-                    memory_scope=ProjectMemoryScope(str(item.get("memory_scope") or "default")),
-                )
-            )
-        except (ValueError, TypeError) as exc:
-            raise FrontendNotReadyError("project identity could not be proven") from exc
-    return tuple(projects)
+        raise NetworkError("project identity frontend flow failed") from exc
+
+    if not isinstance(metadata, dict):
+        raise FrontendNotReadyError("project metadata response is malformed")
+    metadata_name = metadata.get("name")
+    metadata_scope = metadata.get("memory_scope")
+    if type(metadata_name) is not str or metadata_name != observed_name:
+        raise FrontendNotReadyError("project settings title does not match project page")
+    try:
+        memory_scope = ProjectMemoryScope(metadata_scope)
+    except (TypeError, ValueError) as exc:
+        raise FrontendNotReadyError("project memory scope could not be proven") from exc
+    assert observed_target.project_id is not None
+    return ProjectRef(
+        project_id=observed_target.project_id,
+        canonical_url=observed_target.canonical_url,
+        name=observed_name,
+        memory_scope=memory_scope,
+    )
 
 
 async def create_project_frontend(
@@ -185,7 +290,9 @@ async def create_project_frontend(
     *,
     name: str,
     memory_scope: ProjectMemoryScope,
+    on_create_boundary: Callable[[], None],
 ) -> ProjectRef:
+    create_boundary_entered = False
     try:
         await page.goto(f"{ORIGIN}/projects", wait_until="domcontentloaded", timeout=60_000)
         create_control = await _find_visible(
@@ -198,10 +305,12 @@ async def create_project_frontend(
             "Create project control",
             5_000,
         )
-        await create_control.click()
+        await create_control.evaluate("element => element.click()")
         name_input = await _find_visible(
             page,
             (
+                'form[data-testid="create-new-project-form"] input[name="projectName"]',
+                '#project-name',
                 '[role="dialog"] input[name="name"]',
                 '[role="dialog"] input[placeholder*="project name" i]',
                 'input[data-testid="project-name-input"]',
@@ -216,6 +325,7 @@ async def create_project_frontend(
         submit = await _find_visible(
             page,
             (
+                'form[data-testid="create-new-project-form"] button[type="submit"]',
                 '[role="dialog"] button[data-testid="create-project-button"]',
                 '[role="dialog"] button[type="submit"]',
                 '[role="dialog"] button[aria-label="Create project"]',
@@ -223,12 +333,18 @@ async def create_project_frontend(
             "project creation submit control",
             5_000,
         )
-        await submit.click()
+        on_create_boundary()
+        create_boundary_entered = True
+        await submit.evaluate("element => element.click()")
         await page.wait_for_url("**/g/g-p-*/project", timeout=60_000)
     except PlaywrightTimeoutError as exc:
-        raise OperationTimeoutError("project creation outcome is unknown") from exc
+        if create_boundary_entered:
+            raise OperationTimeoutError("project creation outcome is unknown") from exc
+        raise FrontendNotReadyError("project creation preflight timed out before Create") from exc
     except PlaywrightError as exc:
-        raise NetworkError("project creation frontend flow failed") from exc
+        if create_boundary_entered:
+            raise OperationTimeoutError("project creation outcome is unknown") from exc
+        raise NetworkError("project creation frontend preflight failed") from exc
     try:
         target = ChatTarget.parse(page.url)
     except Exception as exc:
@@ -243,7 +359,7 @@ async def create_project_frontend(
     )
 
 
-async def attachment_names(page: Page) -> tuple[str, ...]:
+async def attachment_state(page: Page) -> AttachmentState:
     try:
         raw = await page.evaluate(
             """() => {
@@ -256,26 +372,44 @@ async def attachment_names(page: Page) -> tuple[str, ...]:
               )].find(visible) || null;
               const host = composer?.closest('form') ||
                 composer?.closest('[data-testid="composer"]') || null;
-              if (!host) return [];
-              const selector = '[data-filename], [data-file-name], ' +
-                '[data-testid*="attachment"], [data-testid*="file"]';
-              return [...host.querySelectorAll(selector)]
+              if (!host) return {names: [], pending: false};
+              const fileTiles = [...host.querySelectorAll('[role="group"][aria-label]')]
                 .filter((element) => visible(element) &&
-                  !element.parentElement?.closest(selector))
-                .map((element) => String(
-                  element.getAttribute('data-filename') ||
-                  element.getAttribute('data-file-name') ||
-                  element.getAttribute('aria-label') ||
-                  element.textContent || ''
-                ).trim())
-                .filter(Boolean);
+                  element.querySelector('button[aria-label^="Remove file "]'));
+              const legacyAttachments = [...host.querySelectorAll(
+                '[data-filename], [data-file-name]'
+              )].filter((element) => visible(element) &&
+                !element.parentElement?.closest('[data-filename], [data-file-name]'));
+              const attachments = fileTiles.length ? fileTiles : legacyAttachments;
+              const names = attachments.map((element) => String(
+                element.getAttribute('data-filename') ||
+                element.getAttribute('data-file-name') ||
+                element.getAttribute('aria-label') || ''
+              ).trim()).filter(Boolean);
+              const pending = attachments.some((element) =>
+                element.matches('[aria-busy="true"]') ||
+                Boolean(element.querySelector('[aria-busy="true"], .cursor-wait'))
+              );
+              return {names, pending};
             }"""
         )
     except Exception as exc:
         raise FrontendNotReadyError("could not inspect attachment identity") from exc
-    if not isinstance(raw, list) or any(type(item) is not str or not item for item in raw):
+    if not isinstance(raw, dict):
         raise FrontendNotReadyError("attachment identity response is malformed")
-    return tuple(raw)
+    names = raw.get("names")
+    pending = raw.get("pending")
+    if (
+        not isinstance(names, list)
+        or any(type(item) is not str or not item for item in names)
+        or type(pending) is not bool
+    ):
+        raise FrontendNotReadyError("attachment identity response is malformed")
+    return AttachmentState(tuple(names), pending)
+
+
+async def attachment_names(page: Page) -> tuple[str, ...]:
+    return (await attachment_state(page)).names
 
 
 async def upload_attachments(
@@ -283,12 +417,13 @@ async def upload_attachments(
     attachments: Sequence[AttachmentInput],
     *,
     timeout: float = 60.0,
+    on_upload_boundary: Callable[[], None] | None = None,
 ) -> None:
     expected = tuple(attachments)
     if not expected:
         return
     validate_attachments_unchanged(expected)
-    inputs = page.locator('input[type="file"]')
+    inputs = page.locator('input[type="file"]#upload-files')
     count = await inputs.count()
     if count == 0:
         opened = False
@@ -307,10 +442,12 @@ async def upload_attachments(
                 continue
         if not opened:
             raise FrontendNotReadyError("could not open the ChatGPT attachment menu")
-        inputs = page.locator('input[type="file"]')
+        inputs = page.locator('input[type="file"]#upload-files')
         count = await inputs.count()
     if count != 1:
         raise FrontendNotReadyError("could not identify one exact ChatGPT file input")
+    if on_upload_boundary is not None:
+        on_upload_boundary()
     try:
         await inputs.first.set_input_files([str(item.path) for item in expected])
     except PlaywrightTimeoutError as exc:
@@ -321,8 +458,9 @@ async def upload_attachments(
     expected_names = Counter(item.path.name for item in expected)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        observed = Counter(await attachment_names(page))
-        if observed == expected_names:
+        state = await attachment_state(page)
+        observed = Counter(state.names)
+        if observed == expected_names and not state.pending:
             return
         if observed and any(observed[name] > expected_names[name] for name in observed):
             raise FrontendNotReadyError("unexpected or duplicate attachment identity appeared")
@@ -343,13 +481,27 @@ async def click_send_atomic(
     try:
         result = await page.evaluate(
             """({prompt: expectedPrompt, target_path: expectedPath,
+                    target_kind: targetKind, project_id: projectId,
+                    conversation_id: conversationId,
                     attachment_names: expectedAttachmentNames}) => {
               const current = new URL(window.location.href);
               const exactOrigin = current.protocol === 'https:' &&
                 ['chatgpt.com', 'www.chatgpt.com'].includes(current.hostname.toLowerCase()) &&
                 !current.username && !current.password &&
                 (current.port === '' || current.port === '443');
-              const exactPath = current.pathname === expectedPath;
+              const stableProjectRoute = (suffix) => {
+                if (!projectId) return false;
+                const prefix = `/g/${projectId}`;
+                return current.pathname === `${prefix}${suffix}` ||
+                  (current.pathname.startsWith(`${prefix}-`) &&
+                    current.pathname.endsWith(suffix));
+              };
+              let exactPath = current.pathname === expectedPath;
+              if (targetKind === 'project') {
+                exactPath = stableProjectRoute('/project');
+              } else if (targetKind === 'project_conversation') {
+                exactPath = stableProjectRoute(`/c/${conversationId}`);
+              }
               const exactSuffix = current.search === '' && current.hash === '';
               if (!exactOrigin || !exactPath || !exactSuffix) {
                 return {ok: false, reason: 'page_identity'};
@@ -374,18 +526,25 @@ async def click_send_atomic(
               }
               const host = composer.closest('form') ||
                 composer.closest('[data-testid="composer"]') || null;
-              const selector = '[data-filename], [data-file-name], ' +
-                '[data-testid*="attachment"], [data-testid*="file"]';
-              const names = host ? [...host.querySelectorAll(selector)]
+              const fileTiles = host ? [...host.querySelectorAll('[role="group"][aria-label]')]
                 .filter((element) => visible(element) &&
-                  !element.parentElement?.closest(selector))
-                .map((element) => String(
-                  element.getAttribute('data-filename') ||
-                  element.getAttribute('data-file-name') ||
-                  element.getAttribute('aria-label') ||
-                  element.textContent || ''
-                ).trim())
-                .filter(Boolean) : [];
+                  element.querySelector('button[aria-label^="Remove file "]')) : [];
+              const legacyAttachments = host ? [...host.querySelectorAll(
+                '[data-filename], [data-file-name]'
+              )].filter((element) => visible(element) &&
+                !element.parentElement?.closest('[data-filename], [data-file-name]')) : [];
+              const attachments = fileTiles.length ? fileTiles : legacyAttachments;
+              const names = attachments.map((element) => String(
+                element.getAttribute('data-filename') ||
+                element.getAttribute('data-file-name') ||
+                element.getAttribute('aria-label') || ''
+              ).trim()).filter(Boolean);
+              if (attachments.some((element) =>
+                element.matches('[aria-busy="true"]') ||
+                Boolean(element.querySelector('[aria-busy="true"], .cursor-wait'))
+              )) {
+                return {ok: false, reason: 'attachments_pending'};
+              }
               const observed = Object.create(null);
               for (const name of names) observed[name] = (observed[name] || 0) + 1;
               const expectedKeys = Object.keys(expectedAttachmentNames).sort();
@@ -406,6 +565,9 @@ async def click_send_atomic(
             {
                 "prompt": prompt,
                 "target_path": target_path,
+                "target_kind": target.kind.value,
+                "project_id": target.project_id,
+                "conversation_id": target.conversation_id,
                 "attachment_names": dict(expected_names),
             },
         )

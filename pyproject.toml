@@ -21,7 +21,7 @@ packages = ["src/playwright_api"]
 
 [tool.hatch.build.targets.sdist]
 include = ["/src/playwright_api", "/README.md", "/pyproject.toml"]
-exclude = ["/.gitignore", "/.plan", "/dist", "/reference", "/tests", "**/__pycache__", "**/*.pyc"]
+exclude = ["/.plan", "/dist", "/reference", "/tests", "**/__pycache__", "**/*.pyc"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

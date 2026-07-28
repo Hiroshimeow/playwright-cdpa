@@ -91,5 +91,8 @@ async def test_atomic_send_rejects_query_and_fragment_in_browser_callback() -> N
     assert page.payload == {
         "prompt": "prompt",
         "target_path": "/c/conversation-1",
+        "target_kind": "conversation",
+        "project_id": None,
+        "conversation_id": "conversation-1",
         "attachment_names": {},
     }

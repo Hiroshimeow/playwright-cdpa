@@ -10,6 +10,10 @@ from .errors import InvalidInputError
 ORIGIN = "https://chatgpt.com"
 _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9_-]{8,160}$")
 _PROJECT_ID = re.compile(r"^g-p-[A-Za-z0-9_-]{8,160}$")
+_REAL_PROJECT_ROUTE = re.compile(
+    r"^(g-p-[0-9a-f]{32})(?:-[A-Za-z0-9][A-Za-z0-9_-]{0,127})?$",
+    re.IGNORECASE,
+)
 
 
 class TargetKind(str, Enum):
@@ -125,6 +129,9 @@ def _validate_conversation_id(value: str) -> str:
 def _validate_project_id(value: str) -> str:
     if type(value) is not str or not _PROJECT_ID.fullmatch(value):
         raise InvalidInputError("invalid project ID")
+    real_route = _REAL_PROJECT_ROUTE.fullmatch(value)
+    if real_route is not None:
+        return real_route.group(1).lower()
     return value
 
 

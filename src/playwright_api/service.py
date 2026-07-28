@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from playwright.async_api import (
@@ -57,8 +57,8 @@ from .frontend import (
     click_stop_button,
     create_project_frontend,
     fill_composer,
+    find_project_frontend,
     find_stop_button,
-    list_projects_frontend,
     observe_frontend,
     upload_attachments,
     verify_authenticated,
@@ -78,7 +78,6 @@ from .projects import (
     ProjectMemoryScope,
     ProjectRef,
     ProjectRegistry,
-    select_exact_project,
 )
 from .schema import decode_optional_identifier
 from .storage import StateStore
@@ -190,17 +189,7 @@ class ChatGPTClient:
     ) -> ProjectRef | None:
         if project_id is None and name is None:
             raise InvalidInputError("find_project requires project_id or name")
-        projects = await self._list_projects()
-        if project_id is not None:
-            target = ChatTarget.project(project_id)
-            matches = [project for project in projects if project.project_id == target.project_id]
-            if name is not None:
-                matches = [project for project in matches if project.name == name]
-            if len(matches) > 1:
-                raise ConflictingIdentityError("multiple exact projects matched")
-            return matches[0] if matches else None
-        assert name is not None
-        return select_exact_project(projects, name=name)
+        return await self._find_project(project_id=project_id, name=name)
 
     async def ensure_project(
         self,
@@ -217,8 +206,7 @@ class ChatGPTClient:
             if existing.project is not None:
                 return existing.project
 
-        projects = await self._list_projects()
-        exact = select_exact_project(projects, name=name)
+        exact = await self._find_project(name=name)
         if existing is not None:
             if exact is None:
                 raise AmbiguousOutcomeError(
@@ -234,16 +222,22 @@ class ChatGPTClient:
             )
             return self.projects.resolve(key, exact).project or exact
 
-        _record, acquired = self.projects.claim_creation(
-            key=key,
-            name=name,
-            memory_scope=memory_scope,
-        )
-        if not acquired:
-            raise AmbiguousOutcomeError(
-                "project creation is owned or unknown; reconcile before Create"
+        def on_create_boundary() -> None:
+            _record, acquired = self.projects.claim_creation(
+                key=key,
+                name=name,
+                memory_scope=memory_scope,
             )
-        created = await self._create_project(name, memory_scope)
+            if not acquired:
+                raise AmbiguousOutcomeError(
+                    "project creation is owned or unknown; reconcile before Create"
+                )
+
+        created = await self._create_project(
+            name,
+            memory_scope,
+            on_create_boundary,
+        )
         if created.name != name or created.memory_scope is not memory_scope:
             raise ConflictingIdentityError("created project identity differs from requested metadata")
         return self.projects.resolve(key, created).project or created
@@ -253,7 +247,12 @@ class ChatGPTClient:
             raise InvalidInputError("project must be a ProjectRef")
         return project.target
 
-    async def _list_projects(self) -> tuple[ProjectRef, ...]:
+    async def _find_project(
+        self,
+        *,
+        project_id: str | None = None,
+        name: str | None = None,
+    ) -> ProjectRef | None:
         page: Page | None = None
         try:
             async with BrowserSession(self.config) as session:
@@ -261,7 +260,11 @@ class ChatGPTClient:
                 page = await session.context.new_page()
                 await page.goto(ORIGIN, wait_until="domcontentloaded", timeout=60_000)
                 await verify_authenticated(page)
-                return await list_projects_frontend(page)
+                return await find_project_frontend(
+                    page,
+                    project_id=project_id,
+                    name=name,
+                )
         finally:
             if page is not None and not page.is_closed():
                 try:
@@ -273,6 +276,7 @@ class ChatGPTClient:
         self,
         name: str,
         memory_scope: ProjectMemoryScope,
+        on_create_boundary: Callable[[], None],
     ) -> ProjectRef:
         page: Page | None = None
         try:
@@ -285,6 +289,7 @@ class ChatGPTClient:
                     page,
                     name=name,
                     memory_scope=memory_scope,
+                    on_create_boundary=on_create_boundary,
                 )
         finally:
             if page is not None and not page.is_closed():
@@ -339,7 +344,14 @@ class ChatGPTClient:
                 )
             return self._result(self.store.load(request_id))
         identity = record.identity
-        if identity is None or not identity.conversation_id:
+        recoverable_project_root = bool(
+            (identity is None or not identity.conversation_id)
+            and record.target_kind == TargetKind.PROJECT.value
+            and record.target_project_id is not None
+            and identity is not None
+            and identity.user_message_id is not None
+        )
+        if (identity is None or not identity.conversation_id) and not recoverable_project_root:
             failure = IdentityMissingError(
                 "persisted request lacks exact conversation identity"
             ).as_failure()
@@ -354,6 +366,18 @@ class ChatGPTClient:
             async with BrowserSession(self.config) as session:
                 assert session.context is not None
                 context = session.context
+                backend = AuthenticatedBackend(context)
+                if identity is None or not identity.conversation_id:
+                    record = await self._recover_project_conversation_identity(
+                        record,
+                        context,
+                        backend,
+                    )
+                    identity = record.identity
+                if identity is None or not identity.conversation_id:
+                    raise IdentityMissingError(
+                        "project conversation reconciliation produced no exact identity"
+                    )
                 preferred_target = (
                     record.helper_page_target_id
                     if record.helper_page_closed_at is None
@@ -371,7 +395,6 @@ class ChatGPTClient:
                         expected_revision=current.revision,
                     )
                 await verify_authenticated(lease.page)
-                backend = AuthenticatedBackend(context)
                 identity = await self._ensure_monitorable_identity(record, backend)
                 candidate = await monitor_live(
                     identity,
@@ -414,6 +437,94 @@ class ChatGPTClient:
                 return current
             record = current
         return record
+
+    async def _recover_project_conversation_identity(
+        self,
+        record: TurnRecord,
+        context: Any,
+        backend: Any,
+    ) -> TurnRecord:
+        identity = record.identity
+        if (
+            record.target_kind != TargetKind.PROJECT.value
+            or record.target_project_id is None
+            or identity is None
+            or identity.user_message_id is None
+        ):
+            raise IdentityMissingError(
+                "project-root recovery lacks exact accepted user identity"
+            )
+
+        matches: list[ChatTarget] = []
+        for page in list(context.pages):
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                continue
+            try:
+                candidate = ChatTarget.parse(page.url)
+            except InvalidInputError:
+                continue
+            if (
+                candidate.kind is TargetKind.PROJECT_CONVERSATION
+                and candidate.project_id == record.target_project_id
+            ):
+                matches.append(candidate)
+        if not matches:
+            raise IdentityMissingError(
+                "no exact project conversation page is available for recovery"
+            )
+        if len(matches) != 1:
+            raise ConflictingIdentityError(
+                "multiple exact project conversation pages matched recovery"
+            )
+        target = matches[0]
+        assert target.conversation_id is not None
+        candidate_identity = merge_identity(
+            identity,
+            TurnIdentity(
+                conversation_id=target.conversation_id,
+                sources={"conversation_id": "project-url-recovery"},
+            ),
+            source="project-url-recovery",
+        )
+        snapshot = await backend.snapshot(target.conversation_id)
+        if snapshot.graph is None:
+            raise IdentityMissingError(
+                "project conversation graph is unavailable for recovery"
+            )
+        discovered = discover_user_identity(
+            snapshot.graph,
+            candidate_identity,
+            baseline_node_fingerprints=record.baseline_node_fingerprints,
+            prompt=None,
+        )
+        coordination_key = target.coordination_key
+        with self.coordination.lock(coordination_key, timeout=2.0):
+            owner = self.coordination.load(coordination_key).active_request_id
+            if owner not in {None, record.request_id}:
+                raise OwnershipConflictError(
+                    "recovered project conversation has a different active owner"
+                )
+            if owner is None:
+                self.coordination.claim(coordination_key, record.request_id)
+
+        current = self.store.load(record.request_id)
+        updated = current.with_identity(discovered)
+        if updated.send_provenance is not SendProvenance.DURABLE_HANDOFF:
+            updated = updated.with_send_provenance(
+                SendProvenance.USER_IDENTITY_BOUND
+            ).with_send_provenance(SendProvenance.DURABLE_HANDOFF)
+        if updated.state in {TurnState.SENT, TurnState.UNKNOWN}:
+            updated = updated.transition(TurnState.RUNNING)
+        try:
+            return self.store.save(updated, expected_revision=current.revision)
+        except Exception:
+            self._release_if_owned(
+                coordination_key,
+                record.request_id,
+                terminal=False,
+            )
+            raise
 
     async def cancel(self, request_id: str) -> Result:
         request_id = _require_request_id(request_id)
@@ -674,20 +785,24 @@ class ChatGPTClient:
                     )
 
                 if record.attachments:
-                    current = self.store.load(record.request_id)
-                    record = self.store.save(
-                        current.transition(TurnState.PREPARING)
-                        .with_send_provenance(
-                            SendProvenance.ATTACHMENT_BOUNDARY_ENTERED
+                    def on_upload_boundary() -> None:
+                        nonlocal attachment_entered, record
+                        current = self.store.load(record.request_id)
+                        record = self.store.save(
+                            current.transition(TurnState.PREPARING)
+                            .with_send_provenance(
+                                SendProvenance.ATTACHMENT_BOUNDARY_ENTERED
+                            )
+                            .with_attachment_stage(AttachmentStage.UPLOAD_STARTED),
+                            expected_revision=current.revision,
                         )
-                        .with_attachment_stage(AttachmentStage.UPLOAD_STARTED),
-                        expected_revision=current.revision,
-                    )
-                    attachment_entered = True
+                        attachment_entered = True
+
                     await upload_attachments(
                         page,
                         record.attachments,
                         timeout=min(60.0, self.config.timeout),
+                        on_upload_boundary=on_upload_boundary,
                     )
                     validate_attachments_unchanged(record.attachments)
                     if Counter(await attachment_names(page)) != expected_attachment_names:

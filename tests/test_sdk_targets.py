@@ -67,6 +67,16 @@ def test_target_model_rejects_ambiguous_or_noncanonical_input(value: str) -> Non
         ChatTarget.parse(value)
 
 
+def test_real_project_slug_normalizes_to_stable_project_identity() -> None:
+    project_id = "g-p-0123456789abcdef0123456789abcdef"
+    slugged = f"{project_id}-sdk-live-project-20260729-0145"
+
+    assert ChatTarget.parse(f"/g/{slugged}/project") == ChatTarget.project(project_id)
+    assert ChatTarget.parse(
+        f"/g/{slugged}/c/conversation-123"
+    ) == ChatTarget.project_conversation(project_id, "conversation-123")
+
+
 def test_target_constructors_are_canonical() -> None:
     assert ChatTarget.fresh() == ChatTarget.parse("/")
     assert ChatTarget.conversation("conversation-123") == ChatTarget.parse(

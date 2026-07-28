@@ -72,5 +72,11 @@ class SyncChatGPTClient:
 
     @classmethod
     def _run(cls, awaitable):
-        cls._ensure_no_running_loop()
+        try:
+            cls._ensure_no_running_loop()
+        except RuntimeError:
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            raise
         return asyncio.run(awaitable)
