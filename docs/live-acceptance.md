@@ -179,13 +179,13 @@ A committed rerun then exposed a second exact-lookup boundary: the Project grid 
 Final live verification used the original disposable project and proved:
 
 ```text
-initial page targets = 14
+initial page targets = 16
 find_project calls = 3
 registry-loss ensure_project reconciliation = true
 registry reuse = true
 added targets = []
 removed targets = []
-final page targets = 14
+final page targets = 16
 project-root pages after completion = 0
 ```
 

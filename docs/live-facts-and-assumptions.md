@@ -42,7 +42,7 @@ Independent TEST exposed a Project helper leak: `_find_project` and `_create_pro
 
 A committed rerun also proved that grid visibility alone was insufficient readiness: the requested exact row could hydrate later, and a transient zero match could permit a duplicate Create. Exact-name lookup now polls the exact match count for the existing bounded five-second window before returning zero; one match is selected and multiple matches fail closed. The disposable duplicate created by the failed validation run was removed through the exact frontend delete confirmation.
 
-Final live verification ran three exact-name lookups, one registry-loss `ensure_project` reconciliation, and one registry reuse. The complete page target set remained unchanged at 14, no target was added or removed, and zero project-root helpers remained. Chromium stayed online, and project-conversation, unrelated, and borrowed pages were preserved.
+Final live verification ran three exact-name lookups, one registry-loss `ensure_project` reconciliation, and one registry reuse. The complete page target set remained unchanged at 16, no target was added or removed, and zero project-root helpers remained. Chromium stayed online, and project-conversation, unrelated, and borrowed pages were preserved.
 
 ### Packaging and portability
 
