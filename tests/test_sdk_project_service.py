@@ -43,6 +43,85 @@ def client(tmp_path: Path) -> ChatGPTClient:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["find", "create"])
+async def test_project_helper_closes_page_before_browser_session_detach(
+    tmp_path: Path, monkeypatch, operation: str
+) -> None:
+    import playwright_api.service as service_module
+
+    sdk = client(tmp_path)
+    expected = project("g-p-project123")
+    events: list[str] = []
+
+    class Page:
+        detached = False
+
+        async def goto(self, _url: str, *, wait_until: str, timeout: int) -> None:
+            assert wait_until == "domcontentloaded"
+            assert timeout == 60_000
+            events.append("goto")
+
+        def is_closed(self) -> bool:
+            return self.detached
+
+        async def close(self) -> None:
+            assert self.detached is False
+            events.append("close")
+
+    page = Page()
+
+    class Context:
+        async def new_page(self) -> Page:
+            events.append("new_page")
+            return page
+
+    class Session:
+        def __init__(self, _config) -> None:
+            self.context = Context()
+
+        async def __aenter__(self):
+            events.append("enter")
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            events.append("detach")
+            page.detached = True
+
+    async def verify(_page) -> None:
+        events.append("verify")
+
+    async def find_frontend(_page, **_kwargs) -> ProjectRef:
+        events.append("frontend")
+        return expected
+
+    async def create_frontend(
+        _page, *, name, memory_scope, on_create_boundary
+    ) -> ProjectRef:
+        assert name == "Task Project"
+        assert memory_scope is ProjectMemoryScope.DEFAULT
+        assert callable(on_create_boundary)
+        events.append("frontend")
+        return expected
+
+    monkeypatch.setattr(service_module, "BrowserSession", Session)
+    monkeypatch.setattr(service_module, "verify_authenticated", verify)
+    monkeypatch.setattr(service_module, "find_project_frontend", find_frontend)
+    monkeypatch.setattr(service_module, "create_project_frontend", create_frontend)
+
+    if operation == "find":
+        result = await sdk._find_project(name="Task Project")  # noqa: SLF001
+    else:
+        result = await sdk._create_project(  # noqa: SLF001
+            "Task Project",
+            ProjectMemoryScope.DEFAULT,
+            lambda: None,
+        )
+
+    assert result == expected
+    assert events.index("close") < events.index("detach")
+
+
+@pytest.mark.asyncio
 async def test_ensure_project_creates_once_after_durable_unknown_marker(
     tmp_path: Path, monkeypatch
 ) -> None:

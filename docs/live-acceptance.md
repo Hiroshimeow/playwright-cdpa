@@ -27,7 +27,7 @@ Baseline before SDK productization:
 Final DEV regression after Project, target, attachment, packaging, and upload-boundary corrections:
 
 ```text
-1,398 passed
+1,400 passed
 5 intentional xfails
 0 failed
 Ruff passed
@@ -170,16 +170,21 @@ The SDK verified the exact attachment tile identity, waited until the tile was n
 
 ## 9. Ownership and browser/page cleanup
 
-Before and after the final attachment and ordinary-reuse runs:
+Independent TEST found that Project helpers closed their page after `BrowserSession` detached. The detached Playwright wrapper then appeared closed even though the Chromium target remained, leaking one project-root tab per lookup.
+
+The correction closes Project find/create helper pages inside the active browser session, before `playwright.stop()` detaches. Live verification used the existing disposable project and proved:
 
 ```text
-page targets = 17
-ChatGPT page targets = 13
-active shared request owners = []
-Chromium online = true
+initial page targets = 17
+find_project calls = 3
+registry-loss ensure_project reconciliation = true
+registry reuse = true
+added targets = []
+removed targets = []
+final page targets = 17
 ```
 
-The acceptance helpers did not close Chromium, unrelated tabs, or borrowed conversation pages.
+The previously leaked disposable project-root tabs were closed explicitly. Project-conversation pages, unrelated tabs, and borrowed pages were preserved. Final coordination state had no active owners, and Chromium remained online.
 
 ## 10. Static and state scans
 

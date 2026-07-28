@@ -253,11 +253,10 @@ class ChatGPTClient:
         project_id: str | None = None,
         name: str | None = None,
     ) -> ProjectRef | None:
-        page: Page | None = None
-        try:
-            async with BrowserSession(self.config) as session:
-                assert session.context is not None
-                page = await session.context.new_page()
+        async with BrowserSession(self.config) as session:
+            assert session.context is not None
+            page = await session.context.new_page()
+            try:
                 await page.goto(ORIGIN, wait_until="domcontentloaded", timeout=60_000)
                 await verify_authenticated(page)
                 return await find_project_frontend(
@@ -265,12 +264,12 @@ class ChatGPTClient:
                     project_id=project_id,
                     name=name,
                 )
-        finally:
-            if page is not None and not page.is_closed():
-                try:
-                    await page.close()
-                except PlaywrightError:
-                    pass
+            finally:
+                if not page.is_closed():
+                    try:
+                        await page.close()
+                    except PlaywrightError:
+                        pass
 
     async def _create_project(
         self,
@@ -278,11 +277,10 @@ class ChatGPTClient:
         memory_scope: ProjectMemoryScope,
         on_create_boundary: Callable[[], None],
     ) -> ProjectRef:
-        page: Page | None = None
-        try:
-            async with BrowserSession(self.config) as session:
-                assert session.context is not None
-                page = await session.context.new_page()
+        async with BrowserSession(self.config) as session:
+            assert session.context is not None
+            page = await session.context.new_page()
+            try:
                 await page.goto(ORIGIN, wait_until="domcontentloaded", timeout=60_000)
                 await verify_authenticated(page)
                 return await create_project_frontend(
@@ -291,12 +289,12 @@ class ChatGPTClient:
                     memory_scope=memory_scope,
                     on_create_boundary=on_create_boundary,
                 )
-        finally:
-            if page is not None and not page.is_closed():
-                try:
-                    await page.close()
-                except PlaywrightError:
-                    pass
+            finally:
+                if not page.is_closed():
+                    try:
+                        await page.close()
+                    except PlaywrightError:
+                        pass
 
     async def _claim_when_idle(self, conversation_id: str, request_id: str) -> None:
         deadline = time.monotonic() + self.config.timeout

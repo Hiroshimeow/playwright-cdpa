@@ -36,7 +36,11 @@ A new disposable attachment request completed with exact response `SDK_ATTACHMEN
 
 ### Shared ownership and helper lifecycle
 
-All live requests used one deployment-scoped coordination namespace. Final coordination state had no active owners. Page counts remained 17 total and 13 ChatGPT pages before and after the final attachment/reuse runs. Chromium stayed online, and unrelated or borrowed pages were not closed.
+All live requests used one deployment-scoped coordination namespace. Final coordination state had no active owners.
+
+Independent TEST exposed a Project helper leak: `_find_project` and `_create_project` attempted cleanup only after `BrowserSession` detached, so the Playwright wrapper appeared closed while the Chromium target remained. Cleanup now runs inside the active session before detach.
+
+After removing only the known disposable leaked root tabs, live verification ran three exact-name lookups, one registry-loss `ensure_project` reconciliation, and one registry reuse. The complete page target set remained unchanged at 17; no target was added or removed. Chromium stayed online, and project-conversation, unrelated, and borrowed pages were preserved.
 
 ### Packaging and portability
 
@@ -49,7 +53,7 @@ Cross-process locks use `portalocker`. Package import does not depend on POSIX `
 Final DEV evidence:
 
 ```text
-1,398 passed
+1,400 passed
 5 intentional xfails
 0 failed
 Ruff passed
