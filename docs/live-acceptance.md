@@ -24,10 +24,10 @@ Baseline before SDK productization:
 0 failed
 ```
 
-Final DEV regression after Project, target, attachment, packaging, and upload-boundary corrections:
+Final DEV regression after Project, target, attachment, packaging, upload-boundary, and REVIEW corrections:
 
 ```text
-1,401 passed
+1,406 passed
 5 intentional xfails
 0 failed
 Ruff passed
@@ -110,6 +110,8 @@ A separate client with an empty local project registry then:
 
 Zero matches remain eligible for one Create. Multiple exact matches fail closed. An uncertain post-Create outcome remains durable and prohibits a blind second Create.
 
+After REVIEW, Project creation was tightened further: once the exact `g-p-*` URL exists, the SDK reads the created Project title and memory scope back from Project Settings using the existing exact-ID lookup. A requested `project_only` scope that was not actually applied now fails closed and is never persisted as a falsely verified `ProjectRef`. This correction is covered by automated frontend regressions; no additional live Project was created for it.
+
 ## 6. Fresh project chat and same-request recovery
 
 A fresh chat was started from the exact project-root target. The frontend accepted one Send but initially did not provide a conversation ID in the immediate response.
@@ -125,6 +127,8 @@ second Send = none
 ```
 
 Current ChatGPT project routes may append a readable slug after the stable project ID. The SDK normalizes that route to the stable `g-p-*` identity while preserving the project and conversation IDs separately.
+
+The irreversible Send callback now receives one anchored path pattern generated from the typed target. It accepts only the canonical Project route or one valid slug segment before `/project` or `/c/<conversation-id>`. A reproduced nested route such as `/<slug>/extra/c/<conversation-id>` returns `page_identity` instead of clicking Send. Python and JavaScript regex checks plus focused frontend regressions cover this boundary.
 
 ## 7. Attachment boundary defect and correction
 

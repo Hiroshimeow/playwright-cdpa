@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
+from playwright_api.errors import FrontendNotReadyError
 from playwright_api.frontend import _find_visible, click_send_atomic, observe_frontend
 from playwright_api.targets import ChatTarget
 
@@ -90,9 +93,60 @@ async def test_atomic_send_rejects_query_and_fragment_in_browser_callback() -> N
     assert "current.hash === ''" in page.script
     assert page.payload == {
         "prompt": "prompt",
-        "target_path": "/c/conversation-1",
-        "target_kind": "conversation",
-        "project_id": None,
-        "conversation_id": "conversation-1",
+        "target_path_pattern": r"^/c/conversation\-1$",
         "attachment_names": {},
     }
+
+
+class AtomicProjectRoutePage:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.script = ""
+        self.payload = None
+
+    async def evaluate(self, script: str, payload):
+        self.script = script
+        self.payload = payload
+        exact = re.fullmatch(payload["target_path_pattern"], self.path) is not None
+        return {"ok": True} if exact else {"ok": False, "reason": "page_identity"}
+
+
+_PROJECT_ID = "g-p-0123456789abcdef0123456789abcdef"
+_CONVERSATION_ID = "conversation-123"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "path", "accepted"),
+    [
+        (
+            ChatTarget.project(_PROJECT_ID),
+            f"/g/{_PROJECT_ID}-sdk-project/project",
+            True,
+        ),
+        (
+            ChatTarget.project(_PROJECT_ID),
+            f"/g/{_PROJECT_ID}-sdk-project/extra/project",
+            False,
+        ),
+        (
+            ChatTarget.project_conversation(_PROJECT_ID, _CONVERSATION_ID),
+            f"/g/{_PROJECT_ID}-sdk-project/c/{_CONVERSATION_ID}",
+            True,
+        ),
+        (
+            ChatTarget.project_conversation(_PROJECT_ID, _CONVERSATION_ID),
+            f"/g/{_PROJECT_ID}-sdk-project/extra/c/{_CONVERSATION_ID}",
+            False,
+        ),
+    ],
+)
+async def test_atomic_send_enforces_exact_project_route_at_click_boundary(
+    target: ChatTarget, path: str, accepted: bool
+) -> None:
+    page = AtomicProjectRoutePage(path)
+    if accepted:
+        await click_send_atomic(page, "prompt", target=target)  # type: ignore[arg-type]
+        return
+    with pytest.raises(FrontendNotReadyError, match="page_identity"):
+        await click_send_atomic(page, "prompt", target=target)  # type: ignore[arg-type]

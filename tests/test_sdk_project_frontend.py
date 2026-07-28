@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from playwright_api import ProjectMemoryScope
+from playwright_api import ProjectMemoryScope, ProjectRef
 from playwright_api.errors import ConflictingIdentityError
 from playwright_api.frontend import create_project_frontend, find_project_frontend
 
@@ -37,6 +37,15 @@ class FakeLocator:
         self.page.name = value
 
 
+class NoOpMemoryOption:
+    @property
+    def first(self) -> "NoOpMemoryOption":
+        return self
+
+    async def click(self, *, timeout: int) -> None:
+        assert timeout == 5_000
+
+
 class FakePage:
     def __init__(self) -> None:
         self.url = "https://chatgpt.com/projects"
@@ -49,6 +58,11 @@ class FakePage:
         assert url == "https://chatgpt.com/projects"
         assert wait_until == "domcontentloaded"
         assert timeout == 60_000
+
+    def get_by_text(self, text: str, *, exact: bool) -> NoOpMemoryOption:
+        assert text == "Project-only memory"
+        assert exact is False
+        return NoOpMemoryOption()
 
     def locator(self, selector: str) -> FakeLocator:
         if selector == 'button[aria-label="New project"]':
@@ -67,8 +81,25 @@ class FakePage:
 
 
 @pytest.mark.asyncio
-async def test_create_project_uses_current_stable_form_contract_and_marks_boundary() -> None:
+async def test_create_project_uses_current_stable_form_contract_and_marks_boundary(
+    monkeypatch,
+) -> None:
+    import playwright_api.frontend as frontend_module
+
     page = FakePage()
+    expected = ProjectRef(
+        project_id="g-p-project123",
+        canonical_url="https://chatgpt.com/g/g-p-project123/project",
+        name="Task Project",
+        memory_scope=ProjectMemoryScope.DEFAULT,
+    )
+
+    async def observed(_page, *, project_id, name):
+        assert project_id == expected.project_id
+        assert name == expected.name
+        return expected
+
+    monkeypatch.setattr(frontend_module, "find_project_frontend", observed)
 
     def on_boundary() -> None:
         assert page.name == "Task Project"
@@ -81,9 +112,40 @@ async def test_create_project_uses_current_stable_form_contract_and_marks_bounda
         on_create_boundary=on_boundary,
     )
 
-    assert project.project_id == "g-p-project123"
-    assert project.name == "Task Project"
+    assert project == expected
     assert page.boundary_entered is True
+    assert page.submitted is True
+
+
+@pytest.mark.asyncio
+async def test_create_project_rejects_unproven_project_only_memory_scope(
+    monkeypatch,
+) -> None:
+    import playwright_api.frontend as frontend_module
+
+    page = FakePage()
+    observed = ProjectRef(
+        project_id="g-p-project123",
+        canonical_url="https://chatgpt.com/g/g-p-project123/project",
+        name="Task Project",
+        memory_scope=ProjectMemoryScope.DEFAULT,
+    )
+
+    async def read_observed(_page, *, project_id, name):
+        assert project_id == observed.project_id
+        assert name == observed.name
+        return observed
+
+    monkeypatch.setattr(frontend_module, "find_project_frontend", read_observed)
+
+    with pytest.raises(ConflictingIdentityError, match="memory scope"):
+        await create_project_frontend(
+            page,  # type: ignore[arg-type]
+            name="Task Project",
+            memory_scope=ProjectMemoryScope.PROJECT_ONLY,
+            on_create_boundary=lambda: setattr(page, "boundary_entered", True),
+        )
+
     assert page.submitted is True
 
 

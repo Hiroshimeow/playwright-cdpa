@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -346,12 +347,18 @@ async def create_project_frontend(
         raise FrontendNotReadyError("created project URL could not be proven") from exc
     if target.kind is not TargetKind.PROJECT or target.project_id is None:
         raise FrontendNotReadyError("created project did not resolve to an exact project root")
-    return ProjectRef(
+    observed = await find_project_frontend(
+        page,
         project_id=target.project_id,
-        canonical_url=target.canonical_url,
         name=name,
-        memory_scope=memory_scope,
     )
+    if observed is None:
+        raise ConflictingIdentityError("created project name could not be proven")
+    if observed.memory_scope is not memory_scope:
+        raise ConflictingIdentityError(
+            "created project memory scope differs from requested metadata"
+        )
+    return observed
 
 
 async def attachment_state(page: Page) -> AttachmentState:
@@ -463,6 +470,21 @@ async def upload_attachments(
     raise FrontendNotReadyError("exact attachment identity was not proven after upload")
 
 
+def _atomic_target_path_pattern(target: ChatTarget) -> str:
+    if target.kind not in {TargetKind.PROJECT, TargetKind.PROJECT_CONVERSATION}:
+        return f"^{re.escape(target.canonical_url.removeprefix(ORIGIN))}$"
+    assert target.project_id is not None
+    project_segment = re.escape(target.project_id)
+    if re.fullmatch(r"g-p-[0-9a-f]{32}", target.project_id, re.IGNORECASE):
+        project_segment += r"(?:-[A-Za-z0-9][A-Za-z0-9_-]{0,127})?"
+    suffix = (
+        "/project"
+        if target.kind is TargetKind.PROJECT
+        else f"/c/{re.escape(target.conversation_id or '')}"
+    )
+    return f"^/g/{project_segment}{suffix}$"
+
+
 async def click_send_atomic(
     page: Page,
     prompt: str,
@@ -472,31 +494,17 @@ async def click_send_atomic(
 ) -> None:
     """Revalidate the exact target, composer, attachments, then click Send once."""
     expected_names = Counter(expected_attachment_names or {})
-    target_path = target.canonical_url.removeprefix(ORIGIN)
+    target_path_pattern = _atomic_target_path_pattern(target)
     try:
         result = await page.evaluate(
-            """({prompt: expectedPrompt, target_path: expectedPath,
-                    target_kind: targetKind, project_id: projectId,
-                    conversation_id: conversationId,
+            """({prompt: expectedPrompt, target_path_pattern: expectedPathPattern,
                     attachment_names: expectedAttachmentNames}) => {
               const current = new URL(window.location.href);
               const exactOrigin = current.protocol === 'https:' &&
                 ['chatgpt.com', 'www.chatgpt.com'].includes(current.hostname.toLowerCase()) &&
                 !current.username && !current.password &&
                 (current.port === '' || current.port === '443');
-              const stableProjectRoute = (suffix) => {
-                if (!projectId) return false;
-                const prefix = `/g/${projectId}`;
-                return current.pathname === `${prefix}${suffix}` ||
-                  (current.pathname.startsWith(`${prefix}-`) &&
-                    current.pathname.endsWith(suffix));
-              };
-              let exactPath = current.pathname === expectedPath;
-              if (targetKind === 'project') {
-                exactPath = stableProjectRoute('/project');
-              } else if (targetKind === 'project_conversation') {
-                exactPath = stableProjectRoute(`/c/${conversationId}`);
-              }
+              const exactPath = new RegExp(expectedPathPattern).test(current.pathname);
               const exactSuffix = current.search === '' && current.hash === '';
               if (!exactOrigin || !exactPath || !exactSuffix) {
                 return {ok: false, reason: 'page_identity'};
@@ -559,10 +567,7 @@ async def click_send_atomic(
             }""",
             {
                 "prompt": prompt,
-                "target_path": target_path,
-                "target_kind": target.kind.value,
-                "project_id": target.project_id,
-                "conversation_id": target.conversation_id,
+                "target_path_pattern": target_path_pattern,
                 "attachment_names": dict(expected_names),
             },
         )

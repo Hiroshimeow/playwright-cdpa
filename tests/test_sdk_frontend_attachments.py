@@ -163,12 +163,9 @@ async def test_atomic_send_binds_target_and_attachment_multiset() -> None:
 
     assert page.payload == {
         "prompt": "prompt",
-        "target_path": "/g/g-p-project123/c/conversation-123",
-        "target_kind": "project_conversation",
-        "project_id": "g-p-project123",
-        "conversation_id": "conversation-123",
+        "target_path_pattern": r"^/g/g\-p\-project123/c/conversation\-123$",
         "attachment_names": {"same.txt": 2, "other.pdf": 1},
     }
     assert "attachments_changed" in page.script
     assert "attachments_pending" in page.script
-    assert "stableProjectRoute" in page.script
+    assert "new RegExp(expectedPathPattern).test(current.pathname)" in page.script

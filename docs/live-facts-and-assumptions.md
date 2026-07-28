@@ -55,7 +55,7 @@ Cross-process locks use `portalocker`. Package import does not depend on POSIX `
 Final DEV evidence:
 
 ```text
-1,401 passed
+1,406 passed
 5 intentional xfails
 0 failed
 Ruff passed
@@ -65,6 +65,15 @@ package allowlist passed
 forbidden-operation scan passed
 secret/JWT scan passed across 46 live state/output files
 ```
+
+### Post-REVIEW automated corrections
+
+No additional live Send or Project creation was needed for the two localized REVIEW findings:
+
+- the atomic Send callback now uses one anchored path pattern generated from the typed target, accepting only the canonical route or one valid Project slug segment and rejecting nested segments with `page_identity`;
+- Project creation now reads the created title and memory scope back through exact-ID Project Settings verification, so an ineffective `project_only` selection cannot be persisted as a verified Project.
+
+The generated path pattern was checked with both Python and JavaScript regular-expression engines. Focused frontend/Project regressions cover valid slugged routes, malformed nested routes, observed Project metadata, and an ineffective Project-only control.
 
 ## Automated facts
 
@@ -76,8 +85,8 @@ The suite covers:
 - loopback-only CDP configuration;
 - cross-process coordination and crash release;
 - strict target parsing for root, ordinary conversation, project root, and project conversation;
-- current slugged project-route normalization;
-- exact Project create/reconcile/fail-closed matching;
+- current slugged project-route normalization and exact atomic path matching;
+- exact Project create/reconcile/fail-closed matching, including observed post-create memory scope;
 - immutable attachment snapshots and changed/duplicate/unsupported input rejection;
 - upload preflight versus mutation boundary;
 - partial, duplicate, pending, and manual attachment fail-closed behavior;
