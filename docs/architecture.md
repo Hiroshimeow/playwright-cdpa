@@ -1,159 +1,141 @@
-# Architecture and reliability contract
+# Architecture contract
 
-## Public boundary
+## Boundary
 
-`ChatGPTClient` is the sole application-facing boundary:
+`playwright-api` is one in-process SDK around an existing persistent Chromium. It owns exact browser execution and durable request recovery only.
+
+It does not own agent scheduling, task routing, HTTP transport, MCP exposure, authentication/profile management, or application-specific orchestration.
+
+## Components
 
 ```text
-send(prompt, fresh|conversation, request_id?) -> Result
-get(request_id)                           -> Result
-status(request_id)                        -> Result
-cancel(request_id)                        -> Result
+caller / agent / CDPA adapter
+        |
+        v
+ChatGPTClient
+  |-- StateStore             durable request/result records
+  |-- ProjectRegistry        caller key -> exact project identity
+  |-- CoordinationStore      deployment-wide mutation ownership
+  |-- BrowserSession         borrowed loopback CDP connection
+  |-- frontend/transport     real UI mutation + accepted identity
+  `-- backend/monitor        exact graph response proof
 ```
 
-The Python API is authoritative. `playwright-api` parses arguments, builds `ClientConfig`, calls one method, and renders the same `Result`/exit taxonomy. Browser transport, graph resolution, persistence, ownership, recovery, and page lifecycle do not live in CLI code.
+There is one request state machine. Projects and attachments add durable fields and boundaries to that state machine; they do not create a second worker or monitor.
 
-Caller-supplied request IDs must contain 1-160 ASCII letters, digits, dot, underscore, or hyphen. Only `None` generates a UUID. Every public method validates this before state, coordination, or browser access. No retired command or library aliases are retained.
+## State versus coordination
 
-No daemon, loopback HTTP server, MCP server, plugin framework, browser-profile manager, or second orchestrator is part of this core. Those are adapter concerns and must call this API rather than duplicate it.
+### Durable state
 
-## State planes
+`state_dir` contains request and project identity needed for restart recovery:
 
-Two state planes have different scope:
+- request ID, target identity, revisions, state, provenance, timestamps;
+- prompt hash/length, response hash/length;
+- attachment canonical path, size, SHA-256, media type, and stage;
+- exact accepted turn identity and graph fingerprints;
+- helper-page ownership metadata;
+- stable project caller-key mapping and unknown-create marker.
 
-1. **Repository-local result state** (`StateStore`): exact request record, prompt digest/length, strict identity fields, baseline graph fingerprints, send provenance, cancellation revision, failure, helper target lifecycle, and result digest/length.
-2. **Deployment-wide coordination** (`CoordinationStore`): one exact active request ID per conversation for every process allowed to mutate the same persistent browser profile.
+Prompt content, response content, cookies, tokens, authorization headers, and raw backend payloads are not persisted.
 
-The coordination path is absolute and namespaced by deployment ID. A repository-local path is never stored in coordination. A foreign owner is not loaded from another repository, stolen, expired heuristically, or guessed stale.
+Processes recovering the same request must use the same `state_dir`.
 
-Idempotent same-ID recovery is local to one result state root: every process handling the same logical request must use the same `state_dir`. Coordination is not a cross-repository result ledger and does not make a request record visible in another result root.
+### Coordination
 
-## Existing-conversation Send
+`coordination_dir/deployment_id` contains only deployment-wide ownership records and locks. Every process that can mutate the same Chromium profile must share this namespace.
 
-The ownership sequence is intentionally ordered:
+Different applications may use separate request state roots, but they must not use separate coordination namespaces for the same profile. Coordination prevents concurrent mutation; it cannot recover another application's request result.
 
-1. Validate prompt, exact target, caller request ID, and local duplicate request ID.
-2. Poll the shared coordination record to the bounded deadline.
-3. For each attempt, take the existing per-conversation file lock, reload the record, and claim only when `active_request_id is None`.
-4. Only after the exact claim succeeds, create the local request record.
-5. If local creation fails, release only that exact claim.
+Cross-process locks use `portalocker`. Package import does not require POSIX `fcntl`, and lock files release when the owning process/descriptor exits. Linux behavior is covered by the full suite; Windows import/contract behavior is covered, but native Windows runtime acceptance requires a real Windows run.
 
-This removes the previous wait-then-create-then-claim race. Competing processes cannot both create a local turn and cannot both cross Send.
+## Canonical target model
 
-## Exact page ownership
-
-For an existing conversation, the resolver enumerates every open page and normalizes only exact `https://chatgpt.com/c/<conversation-id>` URLs.
-
-- No exact candidate: create one page and navigate to the exact URL.
-- One exact candidate: reuse it.
-- More than one exact candidate: fail closed.
-- Preferred persisted target: accept it only when it is still the exact conversation page.
-- Unrelated page: ignore it.
-
-A page created by this core is **owned** and may be closed automatically. A pre-existing exact page is **borrowed** and is never closed by Send/get/cancel. Chromium and unrelated pages are never closed. `browser.close()` is forbidden.
-
-The schema-v4 `helper_page_keep` field remains internal. New requests normally use automatic lifecycle, but a pre-click failure caused by manual text, attachments, or a choice prompt durably preserves the exact owned page across later `get` and terminal `cancel` cleanup. This preservation decision is not caller-controlled. There is no public helper-tab policy option.
-
-## Composer and steering state machine
-
-Before filling:
-
-- exact conversation URL and target must be stable;
-- the composer must become present and editable within the bounded hydration window;
-- composer text must be empty;
-- attachments must be absent;
-- blocking choice prompts must be absent.
-
-The prompt is filled once through the real editor. While waiting for Send:
-
-- exact target and URL are rechecked;
-- shared owner must remain the same request ID;
-- local revision and cancellation state must remain unchanged;
-- exact composer text must remain the owned prompt;
-- attachments and choice prompts must remain absent;
-- the set and fingerprints of user graph nodes must remain unchanged.
-
-Assistant streaming is allowed to advance while waiting; a new or changed user node is not. Immediately before persisting the click boundary, the core snapshots the current full graph so the eventual user node is resolved below the latest proven parent.
-
-If Stop is visible and Send is absent, the core leaves the exact prompt in place and waits. If Send becomes visible and enabled while Stop remains visible, that is a supported immediate steering boundary. If Send appears only after Stop disappears, the same path sends then. Send never clicks Stop, Retry, Regenerate, or Continue.
-
-The final browser-side dispatch rechecks the exact fresh-root or exact conversation URL, one visible editable composer, exact prompt text, zero attachments, and one visible enabled real Send button in the same JavaScript turn, then calls that button's real `click()`.
-
-## Irreversible Send protocol
-
-The durable order is:
+All browser paths are normalized once into `ChatTarget`:
 
 ```text
-NOT_ATTEMPTED
-  -> PREPARING + exact identity/baseline
-  -> CLICK_BOUNDARY_ENTERED (persisted)
-  -> real Send click
-  -> FRONTEND_ACCEPTED
-  -> exact accepted identity merge
-  -> USER_IDENTITY_BOUND
-  -> DURABLE_HANDOFF
-  -> RUNNING
+fresh                     /
+conversation              /c/<conversation-id>
+project root              /g/g-p-<project-id>/project
+project conversation      /g/g-p-<project-id>/c/<conversation-id>
+```
+
+Project identity and conversation identity remain separate. The same model is used for parsing, navigation, comparison, coordination, recovery, and atomic Send validation.
+
+Targets with credentials, query strings, fragments, non-default ports, unsupported hosts/schemes, malformed IDs, or ambiguous paths fail before browser mutation.
+
+## Exactly-once Send boundary
+
+The irreversible path is:
+
+```text
+validate input and immutable file snapshots
+  -> create durable request
+  -> claim exact target ownership when applicable
+  -> prove exact page and safe composer
+  -> persist PREPARING and baseline
+  -> persist CLICK_BOUNDARY_ENTERED
+  -> atomically recheck URL/composer/attachments and click real Send once
+  -> persist frontend acceptance and exact user identity
+  -> persist DURABLE_HANDOFF/RUNNING
+  -> prove exact final assistant node
   -> COMPLETE
 ```
 
-Any failure after `CLICK_BOUNDARY_ENTERED` is retry-prohibited and represented as `UNKNOWN` when completion is not yet proven. `send` never clicks again. Recovery uses the same request ID with `get`.
+Once the click boundary is entered, retry is prohibited. A crash, timeout, schema drift, or ambiguous frontend outcome produces `UNKNOWN/get_required`; the caller uses the same request ID with `get`.
 
-The frontend request/response is observed but never intercepted, modified, fulfilled, aborted, or replayed. Frontend acceptance matches only POST responses from the exact HTTPS ChatGPT conversation endpoint `/backend-api/f/conversation`, with no credentials, nondefault port, URL parameters, query, or fragment.
+## Attachment boundary
 
-## Active `get`
+Every attachment is snapshotted before local state or browser construction. Duplicate paths, unsupported media types, missing files, and changed files are rejected deterministically.
 
-`get(request_id)` is the result operation, not a metadata read.
+The mutation path is:
 
-- `RUNNING`: attach to the exact identity and wait for the exact final assistant response.
-- transient `PREPARING`/`SENT`: briefly wait for the active sender to finish durable identity binding before attempting reconciliation.
-- recoverable `UNKNOWN`: bind only from accepted transport identity or the strict persisted baseline/new-user proof; never resend.
-- `COMPLETE`: retrieve the exact response from the conversation graph because response bodies are not persisted.
-- missing helper: reuse one unique exact page or open the exact persisted conversation URL.
-- duplicate exact page: fail closed.
+```text
+SNAPSHOTTED
+  -> persist ATTACHMENT_BOUNDARY_ENTERED + UPLOAD_STARTED
+  -> use the real frontend file input/menu
+  -> prove the exact expected filename multiset
+  -> revalidate file size/hash
+  -> VERIFIED
+  -> revalidate files and chips inside the final Send boundary
+```
 
-Concurrent `get` observers may race to persist COMPLETE. A revision conflict is accepted only when the winning record is already COMPLETE; both observers return the same exact response.
+After `UPLOAD_STARTED`, any uncertain outcome is non-retryable by `send`: the exact helper page is preserved for reconciliation and no second upload or Send is attempted automatically. Manual/foreign attachments are preserved and fail closed.
 
-`status(request_id)` only loads and strictly decodes the local record. Coordination is lazy, so status does not create coordination directories, instantiate `BrowserSession`, navigate, wait, inspect tabs, close helpers, or mutate state.
+File content is never persisted. Local canonical paths exist only in private durable state and are omitted from public projections/logs.
+
+## Project lifecycle boundary
+
+`ProjectRegistry` binds a stable caller key to exact project metadata and identity.
+
+`ensure_project(key, name, memory_scope)` behaves as follows:
+
+1. Reuse an already proven local key binding.
+2. List projects through the real `/projects` frontend.
+3. Select by exact name/ID only; never by card order, date, or fuzzy text.
+4. On zero exact matches, atomically persist an unknown-create marker before clicking Create.
+5. On one exact match, bind and reuse it.
+6. On multiple exact matches, fail closed.
+7. If a prior create is unknown, reconcile exact identity and never click Create a second time blindly.
+8. Persist the exact `g-p-*` identity as soon as the canonical project URL is proven.
+
+Project knowledge-file administration is outside this SDK. Composer attachments remain request-scoped.
+
+## Page ownership and cleanup
+
+The SDK may borrow one uniquely proven exact page or create one owned helper page. It never selects a page by order, title, recency, or approximate URL.
+
+Only a page created or durably owned by the SDK can be closed automatically. Borrowed pages, unrelated pages, duplicate ambiguous pages, and Chromium remain open. On manual text, attachments, or a choice prompt, the SDK durably preserves the exact owned page for operator reconciliation. This policy is internal and not caller-controlled. There is no public helper-tab policy option.
+
+## Response proof
+
+Frontend acceptance supplies transport identity. The SDK then binds the exact accepted user node in the conversation graph and monitors only the corresponding current branch. Completion requires bounded graph convergence and an exact assistant candidate correlated to the request.
+
+`get` reconstructs the exact target from durable project/conversation identity. It never sends and never guesses the latest tab or latest conversation.
 
 ## Cancellation
 
-Cancellation is separate from Send steering.
+Pre-click cancellation can complete locally. Post-click cancellation requires exact conversation ownership, exact page/branch identity, and a positively observed Stop/cancel result. Ownership drift or ambiguous cancellation becomes `cancellation_unproven`, not `cancelled`.
 
-- Before the click boundary, cancellation may be positively persisted without browser mutation.
-- After the click boundary, cancellation requires exact shared ownership, exact conversation identity, and exact branch proof.
-- Cancellation uses the same exact-page resolver as `get`: one unique exact page is borrowed, no exact page causes one owned exact helper to be opened, and duplicate exact pages fail closed.
-- Stop may be clicked only by explicit `cancel`; borrowed pages remain open and only an owned cancellation/helper page may be closed.
-- Missing proof is `cancellation_unproven`; the core does not pretend the generation stopped.
+## Logging and redaction
 
-## Failure and recovery taxonomy
-
-`Result.disposition` is derived from durable state and failure category:
-
-```text
-complete
-get_required
-external_failure
-invariant_failure
-ownership_timeout
-cancelled
-cancellation_unproven
-```
-
-`get_required` means the caller must reuse the same request ID. It never authorizes another Send.
-
-The classification is state-aware:
-
-- `UNKNOWN` always exposes `get_required`; the nested failure remains the cause used for exit/fix policy.
-- terminal pre-click `FAILED` timeout is `external_failure`, not same-ID recovery.
-- terminal schema, identity, graph, corrupt-state, and local invariant failures are `invariant_failure`.
-- `COMPLETE` with an exact response is `complete`; a retrieval failure is classified from its nested cause.
-- `ownership_timeout` is reserved for the initial bounded foreign-owner wait where no local request record exists.
-- duplicate request IDs and ownership conflicts after local state exists are `invariant_failure`.
-- owner mismatch during post-click cancellation is `cancellation_unproven`.
-- cancellation-unproven overrides generic state classification.
-
-Thus exit 10 may accompany `UNKNOWN/get_required` for a recoverable external cause, exit 12 is reserved for active/ambiguous same-ID recovery, exit 20 requires invariant repair before retrying the same ID, exit 21 identifies only no-local-turn owner-wait expiry, and exit 23 identifies cancellation that was requested but not proven.
-
-## Secret boundary
-
-Tokens and browser credentials remain in memory. Persisted/public structures are allowlisted and sanitized. Public identity summaries truncate identifiers. The core does not persist or print cookies, authorization headers, access/resume/proof tokens, Sentinel/Turnstile material, prompt bodies, response bodies, or raw frontend/backend payloads.
+The library uses standard-library logging conventions and does not install global handlers. Diagnostics are sanitized. Public `Result.to_dict()` truncates identity fields and exposes machine-readable error codes/categories without raw backend payloads, credentials, private headers, or local attachment paths.

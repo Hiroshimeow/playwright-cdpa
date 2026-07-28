@@ -1,201 +1,220 @@
 # playwright-api
 
-`playwright-api` is a fail-closed Python execution core for ChatGPT Web in an existing persistent Chromium exposed through loopback CDP.
+`playwright-api` is an installable Python SDK for exact, fail-closed ChatGPT Web execution through an existing Chromium exposed on a loopback CDP endpoint.
 
-It uses the real ChatGPT composer and real Send/Stop controls, observes the unmodified frontend request/response, persists an irreversible Send boundary, resolves the exact conversation graph turn, and returns success only when the final assistant response is proven to belong to that request.
+The Python API is authoritative. The `playwright-api` command is a thin debug adapter. The package is not an HTTP service, MCP server, daemon, scheduler, browser-profile manager, or multi-site framework.
 
-## Safety contract
+## Core guarantees
 
-- Connects only to a loopback CDP endpoint by default: `http://127.0.0.1:9222`.
-- Never calls `browser.close()`.
-- Never intercepts, aborts, fulfills, mutates, or replays the conversation POST.
-- Persists `CLICK_BOUNDARY_ENTERED` before clicking the real Send control.
-- Never sends again after an uncertain click. Recovery uses the same request ID with `get`.
-- Existing-conversation `send` waits boundedly for the deployment-wide owner, atomically claims the conversation, and only then creates repository-local request state.
-- A foreign durable owner is never stolen or guessed stale.
-- Manual composer text, attachments, choice prompts, page replacement, duplicate exact tabs, ownership drift, cancellation drift, and user-graph drift fail closed before Send; the exact URL is rechecked in the same browser callback as the real click.
-- Send steering never clicks Stop. When a response is active, the prompt is filled once; the core sends only when the real Send button becomes enabled.
-- `get` never sends. It reuses one uniquely proven exact conversation page or opens the exact persisted conversation URL. Unrelated and duplicate tabs are never selected.
-- Helper-tab lifecycle is internal. Only a page created or durably owned by this core is eligible for automatic close; a pre-click manual text, attachment, or choice-prompt failure is durably preserved instead. Borrowed Send/get/cancel pages, unrelated tabs, and Chromium remain open.
-- Prompt bodies, response bodies, cookies, authorization material, access/resume/proof tokens, Sentinel/Turnstile values, and raw network payloads are not persisted.
+- Uses the real ChatGPT frontend composer, file input, project flow, and Send control.
+- Never calls `browser.close()` and never closes unrelated or borrowed pages.
+- Never intercepts, aborts, fulfills, mutates, or replays private conversation/upload APIs.
+- Persists attachment mutation and Send click boundaries before irreversible browser actions.
+- Treats each `request_id` as the exact durable idempotency identity.
+- Never sends or uploads again after an uncertain boundary; recovery uses `get(request_id)`.
+- Supports fresh chats, ordinary conversations, project roots, and project conversations through one typed target model.
+- Uses one shared cross-process coordination namespace for every process that can mutate the same Chromium profile.
+- Persists prompt/response hashes and lengths, not prompt or response bodies. Public projections omit local attachment paths.
 
 ## Install
 
-```bash
-uv sync --all-groups
-```
+Python 3.10 or newer is required.
 
-Python 3.10 or newer is required. Cross-process locking currently requires POSIX `fcntl.flock`.
-
-## Personal CLI flow
-
-Fresh conversation:
+Local checkout, non-editable:
 
 ```bash
-uv run playwright-api send "Reply with exactly OK" \
-  --fresh \
-  --request-id personal-001
+uv add /absolute/path/to/playwright-gpt-internal
+# or
+python -m pip install /absolute/path/to/playwright-gpt-internal
 ```
 
-Continue an exact conversation. Waiting for a foreign core owner is the default:
+Built wheel:
 
 ```bash
-uv run playwright-api send "Continue" \
-  --conversation '<conversation-id-or-https://chatgpt.com/c/...>' \
-  --request-id personal-002
+uv build
+python -m pip install dist/playwright_api-0.1.0-py3-none-any.whl
 ```
 
-Retrieve or wait for the exact final response without sending:
+Pinned Git revision:
 
 ```bash
-uv run playwright-api get personal-002
+uv add "playwright-api @ git+<repository-url>@<commit-sha>"
 ```
 
-Read local metadata only; this does not connect to Chromium or change coordination:
+The Chromium instance must already be authenticated and exposed on a loopback CDP endpoint, normally `http://127.0.0.1:9222`.
 
-```bash
-uv run playwright-api status personal-002 --json
-```
-
-Request cancellation:
-
-```bash
-uv run playwright-api cancel personal-002
-```
-
-The complete command surface is `send`, `get`, `status`, and `cancel`. No retired command or library aliases are retained. There is no public `--wait-idle` or helper-tab retention option.
-
-Caller-supplied request IDs are exact durable idempotency identities. They must contain 1-160 ASCII letters, digits, dot, underscore, or hyphen. Only `None` asks the Python API to generate a UUID; an empty or malformed explicit ID is invalid input.
-
-Shared CLI options:
-
-```text
---cdp-endpoint
---state-dir
---coordination-dir
---deployment-id
---timeout
---poll
---send-timeout
---identity-timeout
---json
-```
-
-## Agent/application API flow
-
-The Python API is authoritative. CLI JSON is a thin adapter over the same methods and result model.
+## Async usage
 
 ```python
 import asyncio
 from pathlib import Path
 
-from playwright_api import ChatGPTClient, ClientConfig
+from playwright_api import (
+    AttachmentInput,
+    ChatGPTClient,
+    ChatTarget,
+    ClientConfig,
+)
 
 
 async def main() -> None:
-    core = ChatGPTClient(
+    client = ChatGPTClient(
         ClientConfig(
             cdp_endpoint="http://127.0.0.1:9222",
-            state_dir=Path(".playwright-api"),
-            coordination_dir=Path("/var/tmp/playwright-api-coordination"),
-            deployment_id="shared-cdp-9222",
-            timeout=300,
-            poll=0.5,
+            state_dir=Path("/var/lib/my-agent/playwright-api-state"),
+            coordination_dir=Path("/var/lib/shared/playwright-api-coordination"),
+            deployment_id="chromium-profile-9222",
         )
     )
 
-    sent = await core.send(
-        "Reply with exactly OK",
-        fresh=True,
-        request_id="caller-owned-id-001",
+    result = await client.send(
+        "Read the attachment and reply with exactly ATTACHMENT_OK.",
+        request_id="agent-job-20260729-001",
+        target=ChatTarget.fresh(),
+        attachments=(AttachmentInput.from_path("./evidence.txt"),),
     )
-    if sent.disposition == "get_required":
-        sent = await core.get(sent.request_id)
-    if not sent.success:
-        raise RuntimeError(sent.failure)
-    print(sent.response)
 
-    metadata = core.status(sent.request_id)
-    print(metadata.state, metadata.disposition)
+    if result.disposition == "get_required":
+        result = await client.get(result.request_id)
+    if not result.success:
+        raise RuntimeError(result.failure)
+
+    print(result.response)
 
 
 asyncio.run(main())
 ```
 
-Primary methods:
+Never call `send` again for the same logical request after `get_required`. Reuse the same `request_id` with `get`. Caller-supplied IDs accept 1-160 ASCII letters, digits, dot, underscore, or hyphen.
 
-- `await send(prompt, fresh=True, request_id=...)`
-- `await send(prompt, conversation=..., request_id=...)`
-- `await get(request_id)`
-- `status(request_id)`
-- `await cancel(request_id)`
+## Projects
 
-No retired command or library aliases are retained. Callers use `get` for active result retrieval and `send` for submission.
+```python
+project = await client.ensure_project(
+    key="cdpa-task-id",
+    name="Disposable SDK Project",
+)
+project_target = await client.open_project(project)
 
-## Result dispositions
+result = await client.send(
+    "Reply with exactly PROJECT_OK.",
+    request_id="cdpa-task-id:project-chat:1",
+    target=project_target,
+)
+```
 
-| Disposition | Meaning |
+`ensure_project` is idempotent by caller key and exact project identity:
+
+- zero exact matches: persist an unknown-create marker, then create once;
+- one exact match: reuse it;
+- more than one exact match: fail closed;
+- uncertain creation: reconcile exact identity and never click Create again blindly.
+
+`ProjectMemoryScope.PROJECT_ONLY` is supported. ChatGPT Work mode is unavailable for project-only-memory projects.
+
+## Sync usage
+
+```python
+from playwright_api import ChatTarget, SyncChatGPTClient
+
+client = SyncChatGPTClient()
+result = client.send(
+    "Reply with exactly SYNC_OK.",
+    request_id="sync-job-001",
+    target=ChatTarget.fresh(),
+)
+if result.disposition == "get_required":
+    result = client.get(result.request_id)
+```
+
+`SyncChatGPTClient` contains no browser or state implementation. It delegates to `ChatGPTClient` and raises a clear error when used from an already-running event loop.
+
+## CLI
+
+```bash
+playwright-api send "Reply with exactly OK" \
+  --target / \
+  --request-id cli-001
+
+playwright-api send "Continue" \
+  --target /c/<conversation-id> \
+  --request-id cli-002
+
+playwright-api send "Read this file" \
+  --target / \
+  --attach ./evidence.txt \
+  --request-id cli-003
+
+playwright-api get cli-003
+playwright-api status cli-003 --json
+playwright-api cancel cli-003
+```
+
+The complete CLI command surface is `send`, `get`, `status`, and `cancel`. `status` reads local state only.
+
+## Targets
+
+`ChatTarget` accepts exactly:
+
+| Kind | Canonical path |
 |---|---|
-| `complete` | Exact final response returned. |
-| `invalid_input` | Caller input failed the public boundary; no browser or coordination mutation occurred. |
-| `get_required` | Same-ID `get` may wait/recover; never resend. |
-| `external_failure` | Browser, authentication, network, backend, or frontend external failure. |
-| `invariant_failure` | Schema, corrupt state, identity, graph, or local invariant failure. |
-| `ownership_timeout` | Foreign durable owner remained through the bounded wait; no local turn was created. |
-| `cancelled` | Cancellation was positively represented. |
-| `cancellation_unproven` | Cancellation was requested but could not be proven. |
+| Fresh root | `/` |
+| Ordinary conversation | `/c/<conversation-id>` |
+| Project root / fresh project chat | `/g/g-p-<project-id>/project` |
+| Project conversation | `/g/g-p-<project-id>/c/<conversation-id>` |
 
-`UNKNOWN` always exposes `get_required`: the caller reuses the same request ID and never sends again. The nested failure remains the cause and determines whether the caller can retry immediately, must repair an invariant first, or observed an external outage. A terminal pre-click `FAILED` timeout is instead `external_failure`; same-ID `get` cannot recover a request that never crossed Send.
+Credential-bearing, query-bearing, fragment-bearing, malformed, non-HTTPS, non-ChatGPT, and ambiguous targets are rejected before browser mutation. Conversation targets must resolve to one exact HTTPS ChatGPT conversation endpoint.
 
-Schema, identity, graph, corrupt-state, and local invariant failures are `invariant_failure` when terminal. If one occurs on an `UNKNOWN` request, disposition remains `get_required`, but exit 20 signals that code/state repair is required before retrying same-ID `get`.
+## State and coordination
 
-`ownership_timeout` is reserved for the initial bounded foreign-owner wait where no local request record was created. Duplicate request IDs and ownership conflicts after local state exists are `invariant_failure`. An owner mismatch during post-click cancellation is `cancellation_unproven`, because Stop was not performed or proven.
+Default per-user base locations:
 
-### Exit codes
+- Linux: `${XDG_STATE_HOME:-~/.local/state}/playwright-api`
+- Windows: `%LOCALAPPDATA%\playwright-api`
 
-| Code | Meaning |
-|---:|---|
-| 0 | Exact success, successful `get`, or cancel of an already complete request. |
-| 2 | Invalid input or configuration. |
-| 10 | Recoverable external cause. `UNKNOWN` JSON still reports `get_required`; terminal results report `external_failure`. |
-| 11 | Terminal external cause. |
-| 12 | Active or uncertain result requiring same-ID `get`, including UNKNOWN timeout/ambiguous outcome. |
-| 20 | Schema, identity, graph, corrupt-state, or local invariant failure; UNKNOWN retains `get_required` after repair. |
-| 21 | Initial foreign-owner wait timed out before any local request record was created. |
-| 22 | Cancellation positively represented. |
-| 23 | Cancellation requested but unproven. |
-| 130 | Operator interruption. |
-
-JSON mode writes one result object to stdout. Diagnostics are not mixed into stdout. Identity values are truncated in public output.
-
-## Persistence and coordination
-
-Repository-local request/result state defaults to:
+Request/project state and deployment coordination are separate:
 
 ```text
-.playwright-api/
-├── turns/<request-id>.json
-├── conversations/*.json
-└── locks/*.lock
+<state-dir>/
+├── turns/
+├── projects/
+├── project-locks/
+└── locks/
+
+<coordination-dir>/<deployment-id>/
+├── conversations/
+└── locks/
 ```
 
-Deployment-wide browser ownership is separate:
+Every application/process allowed to mutate the same Chromium profile must use the same absolute `coordination_dir` and `deployment_id`. The same logical request must use the same result state root, so processes recovering it must also use the same `state_dir`. Coordination serializes browser mutation; coordination is not a cross-repository result ledger and is not a substitute for durable request state.
 
-```text
-<coordination-base>/<deployment-id>/
-├── conversations/<sha256-of-conversation-id>.json
-└── locks/*.lock
-```
+## Results and failures
 
-Every process allowed to mutate the same CDP deployment must use one shared absolute coordination base and deployment ID. Different repositories may use different `state_dir` values, but they must not use different coordination namespaces for the same browser profile.
+`Result` exposes typed `state`, `identity`, `failure`, `success`, and `disposition`. Stable failure projections include a machine-readable `code`, `category`, `disposition`, `retryable`, and `external` flag.
 
-For idempotent recovery, the same logical request must use the same result state root. Shared coordination serializes conversation mutation, but coordination is not a cross-repository result ledger; reusing one caller request ID under another `state_dir` does not recover the original local request record.
+No retired command or library aliases are retained.
 
-State uses strict schemas, atomic replacement, file/directory `fsync`, revisions, and POSIX locks. Corrupt bytes are preserved and rejected before browser or ownership mutation. The coordination plane stores only conversation ownership metadata; it does not contain repository paths, prompts, responses, or browser credentials.
+Important dispositions:
+
+| Disposition | Required caller action |
+|---|---|
+| `complete` | Consume the exact response. |
+| `get_required` | Call `get` with the same request ID; never resend. |
+| `invalid_input` | Correct input; no browser mutation occurred. |
+| `ownership_timeout` | Retry later with a new logical request only if no local request was created. |
+| `external_failure` | Repair/wait according to `retryable`. |
+| `invariant_failure` | Repair schema/state/identity drift before continuing. |
+| `cancelled` | Cancellation was positively proven. |
+| `cancellation_unproven` | Treat outcome as unresolved; do not assume stopped. |
+
+`UNKNOWN` always exposes `get_required`; the nested failure remains the cause. A terminal pre-click `FAILED` timeout is an `external_failure`. Terminal schema, identity, graph, corrupt-state, and local invariant defects are `invariant_failure`. `ownership_timeout` is reserved for the initial foreign-owner wait where no local request record was created. ownership conflicts after local state exists are `invariant_failure`, and an owner mismatch during post-click cancellation is `cancellation_unproven`.
 
 ## Documentation
 
-- [Architecture and reliability contract](docs/architecture.md)
-- [Live facts and remaining assumptions](docs/live-facts-and-assumptions.md)
+- [Public API reference](docs/api-reference.md)
+- [Architecture contract](docs/architecture.md)
+- [Agent integration guide](docs/agent-integration.md)
+- [CDPA adapter contract](docs/cdpa-adapter.md)
+- [Migration from the unreleased old name](docs/migration.md)
 - [Live acceptance evidence](docs/live-acceptance.md)
-- [Future CDPA V2 adapter design](docs/cdpa-adapter.md)
+- [Proven facts and remaining assumptions](docs/live-facts-and-assumptions.md)

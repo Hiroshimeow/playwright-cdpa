@@ -1,230 +1,198 @@
 # Live acceptance evidence
 
-Date: 2026-07-27
+Date: 2026-07-29
 
-All commands ran from `/home/ayumi/Workspace/git_project/playwright-api-internal` against loopback CDP 9222. The disposable conversation identifier is shown as `6a66383f…fc90`. Result/state roots were under `/tmp`. Public JSON identifiers were truncated by the CLI. No `browser.close()` was called.
+Repository: `/home/ayumi/Workspace/git_project/playwright-gpt-internal`
 
-## 1. Fresh Send followed by exact result
+Branch: `feat/playwright-api-sdk`
 
-Command:
+Environment:
 
-```bash
-uv run playwright-api send 'Reply with exactly API_V2_LIVE_OK' \
-  --fresh \
-  --request-id live-fresh-20260727b \
-  --state-dir /tmp/pgpt-api-v2-live-a \
-  --coordination-dir /tmp/pgpt-api-v2-live-coordination \
-  --deployment-id cdp-9222-api-v2-live \
-  --timeout 180 --poll 0.5 --json
-```
+- persistent Chrome 150 on loopback CDP `127.0.0.1:9222`;
+- installed wheel in an isolated virtual environment outside the source tree;
+- disposable state and coordination roots under `/tmp`;
+- runtime identifiers below are truncated;
+- no `browser.close()`, request interception, request replay, private upload API, Retry, Regenerate, or automatic Stop action.
 
-Result:
+## 1. Baseline and regression
+
+Baseline before SDK productization:
 
 ```text
-exit = 0
+1,345 passed
+5 intentional xfails
+0 failed
+```
+
+Final DEV regression after Project, target, attachment, packaging, and upload-boundary corrections:
+
+```text
+1,398 passed
+5 intentional xfails
+0 failed
+Ruff passed
+compileall passed
+git diff --check passed
+```
+
+## 2. Build and isolated installation
+
+Commands:
+
+```bash
+uv build
+uv venv --seed /tmp/playwright-api-wheel-turn2
+uv pip install --python /tmp/playwright-api-wheel-turn2/bin/python \
+  dist/playwright_api-0.1.0-py3-none-any.whl
+```
+
+Verified:
+
+```text
+wheel import outside source tree = pass
+playwright_api.__version__ = 0.1.0
+pip check = pass
+wheel members = 27
+sdist members = 27
+py.typed present = true
+tests/.plan/reference/cache/runtime state absent = true
+```
+
+## 3. Fresh text Send and same-ID recovery
+
+A fresh root Send completed with:
+
+```text
+request = sdk-live-text-20260729-01
 state = COMPLETE
-disposition = complete
-response = API_V2_LIVE_OK
-helper target persisted and marked closed after handoff
+response = SDK_TEXT_OK_20260729
+conversation = 6a68d65d…778f
 ```
 
-An earlier fresh attempt exited 10 with `frontend_not_ready` because the newly opened page was inspected before composer hydration. The implementation was corrected to wait boundedly for one safely editable empty composer before filling; the command above is the post-fix acceptance.
+A later `get` using the same request ID returned the same exact result. A duplicate `send` with the same request ID was rejected before another Send could occur.
 
-## 2. Reuse completed conversation
+## 4. Ordinary conversation reuse
 
-Command:
-
-```bash
-uv run playwright-api send 'Reply with exactly API_V2_SECOND_OK' \
-  --conversation '6a66383f…fc90' \
-  --request-id live-second-20260727 \
-  --state-dir /tmp/pgpt-api-v2-live-a \
-  --coordination-dir /tmp/pgpt-api-v2-live-coordination \
-  --deployment-id cdp-9222-api-v2-live \
-  --timeout 180 --poll 0.5 --json
-```
-
-Result:
+The completed ordinary conversation above was reused with a new request:
 
 ```text
-exit = 0
+request = sdk-live-ordinary-reuse-20260729-01
 state = COMPLETE
-response = API_V2_SECOND_OK
+response = SDK_REUSE_OK_20260729
+same conversation = true
+same-ID get = same response
+duplicate request ID rejected = true
 ```
 
-The closed helper from the fresh request was not reused by page order; the exact conversation URL was opened/resolved.
+The SDK resolved the exact conversation identity rather than selecting a page by order.
 
-## 3. Active response and steering readiness
+## 5. Project creation, reuse, and exact reconciliation
 
-A disposable direct frontend fixture started a long response through the real composer/Send control, then filled the steering prompt while Stop was active. It used the same `observe_frontend`, `fill_composer`, and atomic real-Send primitive as the core.
+A uniquely named disposable project was created through the real `/projects` frontend flow.
 
-Observed:
+Verified:
 
 ```text
-exact_page_candidates = 1
-initial_after_fill_send_ready = false
-initial_after_fill_stop_visible = true
-polls_until_send_ready = 601 at 50 ms
-stop_visible_when_send_ready = false
-sent_once = true
-exit = 0
+first ensure_project = created one project
+second ensure_project = reused same project ID
+project ID = g-p-6a68d9…7fd8
+memory scope = default
 ```
 
-Conclusion: this live frontend did not expose enabled Send while Stop remained visible. The prompt was preserved for approximately 30 seconds and sent once only after Send became enabled and Stop disappeared. No Stop click occurred.
+A separate client with an empty local project registry then:
 
-A public core continuation in the same disposable conversation returned:
+- found the exact project name in the Project Directory grid;
+- navigated to the selected project;
+- proved the stable `g-p-*` identity from the canonical route;
+- proved the exact title and memory scope from Project Settings;
+- bound a new stable caller key without clicking Create;
+- reused the same project ID on the next call.
+
+Zero matches remain eligible for one Create. Multiple exact matches fail closed. An uncertain post-Create outcome remains durable and prohibits a blind second Create.
+
+## 6. Fresh project chat and same-request recovery
+
+A fresh chat was started from the exact project-root target. The frontend accepted one Send but initially did not provide a conversation ID in the immediate response.
+
+The request remained unresolved instead of resending. Same-ID recovery then matched the exact project conversation page, bound the accepted user node from the graph, and completed:
 
 ```text
-request_id = live-steer-20260727
-exit = 0
+request = sdk-live-project-chat-20260729-01
 state = COMPLETE
-response = STEERED_API_V2_OK
+response = SDK_PROJECT_OK_20260729
+conversation = 6a68d942…a87c
+second Send = none
 ```
 
-Automated coverage separately proves the immediate Send+Stop branch sends once if that frontend state is observed.
+Current ChatGPT project routes may append a readable slug after the stable project ID. The SDK normalizes that route to the stable `g-p-*` identity while preserving the project and conversation IDs separately.
 
-## 4. Concurrent `get` observer
+## 7. Attachment boundary defect and correction
 
-Initial run:
+The first disposable attachment request failed with:
 
 ```text
-observed start state = SENT
-sender exit = 0, COMPLETE
-get exit = 12, UNKNOWN/identity_missing
-```
-
-This was treated as a defect, not accepted evidence. Root cause: `get` reconciled transient `SENT` before the active sender completed durable user-identity binding.
-
-After the correction, command shape:
-
-```bash
-# process 1
-uv run playwright-api send '<120-line fixture>' \
-  --conversation '6a66383f…fc90' \
-  --request-id live-active-get-retry-20260727 \
-  --state-dir /tmp/pgpt-api-v2-live-d \
-  --coordination-dir /tmp/pgpt-api-v2-live-coordination \
-  --deployment-id cdp-9222-api-v2-live \
-  --timeout 300 --poll 0.25 --json
-
-# process 2, launched after persisted state reached SENT
-uv run playwright-api get live-active-get-retry-20260727 \
-  --state-dir /tmp/pgpt-api-v2-live-d \
-  --coordination-dir /tmp/pgpt-api-v2-live-coordination \
-  --deployment-id cdp-9222-api-v2-live \
-  --timeout 300 --poll 0.25 --json
-```
-
-Result:
-
-```text
-observed start state = SENT
-sender exit = 0
-get exit = 0
-sender response length/hash = 2411 / 206c008627bd18ab
-get response length/hash    = 2411 / 206c008627bd18ab
-```
-
-Both observers returned the same exact response. The `get` path contains no Send call.
-
-## 5. Missing exact tab recovery
-
-The one exact disposable conversation page was closed with `page.close()`; Chromium and unrelated tabs remained open.
-
-Command:
-
-```bash
-uv run playwright-api get live-active-get-retry-20260727 \
-  --state-dir /tmp/pgpt-api-v2-live-d \
-  --coordination-dir /tmp/pgpt-api-v2-live-coordination \
-  --deployment-id cdp-9222-api-v2-live \
-  --timeout 180 --poll 0.25 --json
-```
-
-Result:
-
-```text
-exact pages closed before get = 1
-browser closed = false
-exit = 0
-state = COMPLETE
-response length/hash = 2411 / 206c008627bd18ab
-```
-
-The missing helper caused exact URL recovery. No Send was created.
-
-## 6. Client restart and same-ID recovery
-
-Fixture command shape:
-
-```bash
-uv run playwright-api send '<90-line fixture>' \
-  --conversation '6a66383f…fc90' \
-  --request-id live-restart-get-20260727 \
-  --state-dir /tmp/pgpt-api-v2-live-e \
-  --coordination-dir /tmp/pgpt-api-v2-live-coordination \
-  --deployment-id cdp-9222-api-v2-live \
-  --timeout 300 --poll 0.25 --json
-```
-
-The first process encountered authenticated backend HTTP 429 after crossing the irreversible boundary and exited 10 with:
-
-```text
+failure = could not identify one exact ChatGPT file input
 state = UNKNOWN
-disposition = get_required
-failure = backend GET failed with HTTP 429
+attachment stage = UPLOAD_STARTED
 ```
 
-No resend was issued. Later command:
+Investigation proved the old implementation persisted the upload boundary before file-input preflight. The frontend function raised because multiple file inputs existed before `set_input_files` was called.
 
-```bash
-uv run playwright-api get live-restart-get-20260727 \
-  --state-dir /tmp/pgpt-api-v2-live-e \
-  --coordination-dir /tmp/pgpt-api-v2-live-coordination \
-  --deployment-id cdp-9222-api-v2-live \
-  --timeout 300 --poll 0.5 --json
-```
-
-Result:
+Read-only evidence on the exact conversation showed:
 
 ```text
-exit = 0
-state = COMPLETE
-disposition = complete
-response length/hash = 2060 / 6b61ed2d7daf1f13
-accepted user message ID occurrences in exact graph = 1
+matching project conversation pages = 1
+composer empty = true
+attachment chips = []
+pending attachments = false
+old upload prompt occurrences in graph = 0
 ```
 
-This proves same-ID restart recovery and one submitted user node despite an external transient failure.
+The correction moves the durable upload boundary to immediately before the exact `#upload-files` mutation. Preflight failures now remain pre-mutation, fail terminally, and release ownership. Post-mutation uncertainty remains fail closed.
 
-## 7. Different local state roots, one shared owner
+The stale live owner was released only after the code-path and frontend/graph evidence proved no upload and no Send occurred. Its original UNKNOWN turn record was preserved as evidence.
 
-A separate process held the exact conversation claim as `foreign-live-owner` for three seconds using the same absolute coordination root/deployment ID. The contender used a different local state root:
+## 8. Attachment Send acceptance
 
-```bash
-uv run playwright-api send 'Reply with exactly SHARED_OWNER_SERIALIZED_OK' \
-  --conversation '6a66383f…fc90' \
-  --request-id live-shared-owner-20260727 \
-  --state-dir /tmp/pgpt-api-v2-live-b \
-  --coordination-dir /tmp/pgpt-api-v2-live-coordination \
-  --deployment-id cdp-9222-api-v2-live \
-  --timeout 180 --poll 0.25 --json
-```
-
-Result:
+A new request used one disposable text file through the real frontend file input:
 
 ```text
-foreign log = FOREIGN_CLAIMED, FOREIGN_RELEASED
-contender exit = 0
+request = sdk-live-attachment-20260729-03
 state = COMPLETE
-response = SHARED_OWNER_SERIALIZED_OK
-elapsed = 22 seconds
+response = SDK_ATTACHMENT_OK_20260729_03
+conversation = 6a68d942…a87c
+attachment stage = VERIFIED
+file content persisted = false
+absolute path in public result = false
 ```
 
-Automated acceptance additionally asserts that no contender local turn file exists before claim and only one contender can create a turn after release.
+The SDK verified the exact attachment tile identity, waited until the tile was no longer pending, revalidated file size/hash and the exact attachment multiset at the irreversible Send boundary, then clicked Send once.
 
-## 8. Secret and forbidden-operation evidence
+## 9. Ownership and browser/page cleanup
 
-Verification scans cover stdout/stderr, persisted local state, coordination files, and documentation/evidence for forbidden secret labels and raw credentials. Public JSON uses truncated identity summaries. The implementation contains no `browser.close()`, request routing/interception, abort, fulfill, conversation POST mutation, Retry, Regenerate, or automatic Stop path.
+Before and after the final attachment and ordinary-reuse runs:
 
-Final command results are recorded in the DEV handoff report after the full verification gate.
+```text
+page targets = 17
+ChatGPT page targets = 13
+active shared request owners = []
+Chromium online = true
+```
+
+The acceptance helpers did not close Chromium, unrelated tabs, or borrowed conversation pages.
+
+## 10. Static and state scans
+
+Verified:
+
+```text
+forbidden browser/request mutation AST scan = pass
+HTTP/FastAPI/MCP server symbol scan = pass
+secret/JWT scan = pass across 46 live state/output files
+```
+
+Durable attachment state contains path, size, digest, media type, and mutation stage, but not file content. Public result projection omits the absolute local path.
+
+## Remaining unproven boundary
+
+Linux import, locking, crash-release contracts, build, and live CDP behavior were exercised. Windows-oriented import and locking contracts are covered by automated tests, and unconditional `fcntl` imports are gone. Native Windows runtime acceptance was not performed and must not be claimed until the wheel is executed on a real Windows host.
