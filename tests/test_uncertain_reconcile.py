@@ -102,8 +102,47 @@ async def test_uncertain_send_without_graph_anchor_cannot_reconcile(tmp_path) ->
         await core._ensure_monitorable_identity(record, Backend({}))  # type: ignore[arg-type]
 
 
+class _Page:
+    url = "https://chatgpt.com/c/conversation-1"
+    target_id = "uncertain-exact-page"
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.context = None
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    async def evaluate(self, _script: str):
+        return {"ok": True, "hasToken": True, "status": 200}
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _CDPSession:
+    def __init__(self, page: _Page) -> None:
+        self.page = page
+
+    async def send(self, method: str):
+        assert method == "Target.getTargetInfo"
+        return {"targetInfo": {"targetId": self.page.target_id}}
+
+    async def detach(self) -> None:
+        return None
+
+
 class _Context:
-    pass
+    def __init__(self) -> None:
+        self.page = _Page()
+        self.page.context = self
+        self.pages = [self.page]
+
+    async def new_page(self) -> _Page:
+        return self.page
+
+    async def new_cdp_session(self, page: _Page) -> _CDPSession:
+        return _CDPSession(page)
 
 
 class _BrowserSession:
@@ -119,9 +158,9 @@ class _BrowserSession:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("operation", "drift"), [("watch", "changed"), ("recover", "missing")])
+@pytest.mark.parametrize("drift", ["changed", "missing"])
 async def test_uncertain_recovery_rejects_changed_or_missing_baseline_without_binding(
-    tmp_path, monkeypatch, operation: str, drift: str
+    tmp_path, monkeypatch, drift: str
 ) -> None:
     import playwright_gpt_core.service as service_module
 
@@ -206,7 +245,7 @@ async def test_uncertain_recovery_rejects_changed_or_missing_baseline_without_bi
     record = core.store.create(record.transition(TurnState.UNKNOWN))
     claim = core.coordination.claim("conversation-1", record.request_id)
 
-    result = await getattr(core, operation)(record.request_id)
+    result = await core.get(record.request_id)
 
     persisted = core.store.load(record.request_id)
     assert result.failure is not None
@@ -361,10 +400,9 @@ def _ambiguous_post_baseline_graph(kind: str) -> dict:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["watch", "recover"])
 @pytest.mark.parametrize("kind", ["sibling", "current-chain"])
 async def test_public_uncertain_recovery_rejects_multiple_post_baseline_users(
-    tmp_path, monkeypatch, operation: str, kind: str
+    tmp_path, monkeypatch, kind: str
 ) -> None:
     import playwright_gpt_core.service as service_module
 
@@ -386,7 +424,7 @@ async def test_public_uncertain_recovery_rejects_multiple_post_baseline_users(
     record = _uncertain_public_record(core, _baseline_graph())
     claim = core.coordination.claim("conversation-1", record.request_id)
 
-    result = await getattr(core, operation)(record.request_id)
+    result = await core.get(record.request_id)
 
     persisted = core.store.load(record.request_id)
     current_claim = core.coordination.load("conversation-1")
@@ -455,7 +493,7 @@ async def test_public_uncertain_recovery_accepts_one_unique_post_baseline_user(
     record = _uncertain_public_record(core, _baseline_graph())
     core.coordination.claim("conversation-1", record.request_id)
 
-    result = await core.watch(record.request_id)
+    result = await core.get(record.request_id)
 
     persisted = core.store.load(record.request_id)
     assert result.success is True

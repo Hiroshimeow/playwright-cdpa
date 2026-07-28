@@ -7,6 +7,7 @@ import pytest
 from playwright_gpt_core.errors import SchemaDriftError
 from playwright_gpt_core.transport import (
     FrontendAcceptance,
+    is_real_conversation_response,
     parse_sse_events,
     reduce_handoff,
     reduce_request_payload,
@@ -16,6 +17,38 @@ from playwright_gpt_core.transport import (
 class FakeRequest:
     def __init__(self, payload: dict) -> None:
         self.post_data = json.dumps(payload)
+
+
+class FakeResponseRequest:
+    def __init__(self, method: str) -> None:
+        self.method = method
+
+
+class FakeResponse:
+    def __init__(self, url: str, method: str = "POST") -> None:
+        self.url = url
+        self.request = FakeResponseRequest(method)
+
+
+@pytest.mark.parametrize(
+    ("url", "method", "expected"),
+    [
+        ("https://chatgpt.com/backend-api/f/conversation", "POST", True),
+        ("https://www.chatgpt.com:443/backend-api/f/conversation", "POST", True),
+        ("http://chatgpt.com/backend-api/f/conversation", "POST", False),
+        ("https://user:pass@chatgpt.com/backend-api/f/conversation", "POST", False),
+        ("https://chatgpt.com:444/backend-api/f/conversation", "POST", False),
+        ("https://chatgpt.com/backend-api/f/conversation;foreign", "POST", False),
+        ("https://chatgpt.com/backend-api/f/conversation?foreign=1", "POST", False),
+        ("https://chatgpt.com/backend-api/f/conversation#foreign", "POST", False),
+        ("https://chatgpt.com/backend-api/f/conversation", "GET", False),
+        ("https://chatgpt.com:bad/backend-api/f/conversation", "POST", False),
+    ],
+)
+def test_real_conversation_response_requires_exact_https_endpoint(
+    url: str, method: str, expected: bool
+) -> None:
+    assert is_real_conversation_response(FakeResponse(url, method)) is expected
 
 
 def test_request_reduction_extracts_only_identity_fields() -> None:

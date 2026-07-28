@@ -33,3 +33,10 @@ class CoordinationStore:
         self, conversation_id: str, request_id: str, *, terminal: bool
     ) -> ConversationRecord:
         return self._store.release_conversation(conversation_id, request_id, terminal=terminal)
+
+    def release_if_owned(
+        self, conversation_id: str, request_id: str, *, terminal: bool
+    ) -> ConversationRecord:
+        return self._store.release_conversation_if_owned(
+            conversation_id, request_id, terminal=terminal
+        )

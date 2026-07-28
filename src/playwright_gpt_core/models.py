@@ -216,7 +216,7 @@ class TurnIdentity:
         if value is None:
             return None
         if not isinstance(value, dict):
-            raise ValueError("identity must be an object")
+            raise ValueError("identity must be an object")  # noqa: TRY004
         names = (
             "conversation_id",
             "transport_turn_exchange_id",
@@ -243,7 +243,7 @@ class TurnIdentity:
         }
         raw_sources = value.get("sources", {})
         if not isinstance(raw_sources, dict):
-            raise ValueError("identity sources must be an object")
+            raise ValueError("identity sources must be an object")  # noqa: TRY004
         sources: dict[str, str] = {}
         for raw_key, raw_item in raw_sources.items():
             key = decode_identifier(raw_key, "identity source key", max_length=160)
@@ -400,6 +400,16 @@ class TurnRecord:
             self,
             helper_page_target_id=target_id,
             helper_page_keep=keep,
+            helper_page_closed_at=None,
+            updated_at=utc_now(),
+        )
+
+    def with_recovered_helper_page(self, target_id: str) -> TurnRecord:
+        target_id = _validate_helper_target_id(target_id)
+        return replace(
+            self,
+            helper_page_target_id=target_id,
+            helper_page_keep=False,
             helper_page_closed_at=None,
             updated_at=utc_now(),
         )
@@ -725,12 +735,30 @@ class Result:
             and self.failure is None
         )
 
+    @property
+    def disposition(self) -> str:
+        if self.state == TurnState.CANCELLED:
+            return "cancelled"
+        if self.failure is not None and self.failure.disposition in {
+            "ownership_timeout",
+            "cancellation_unproven",
+        }:
+            return self.failure.disposition
+        if self.state == TurnState.UNKNOWN:
+            return "get_required"
+        if self.failure is not None:
+            return self.failure.disposition
+        if self.state == TurnState.COMPLETE:
+            return "complete" if self.response is not None else "get_required"
+        return "get_required"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "request_id": self.request_id,
             "state": self.state.value,
             "success": self.success,
+            "disposition": self.disposition,
             "response": self.response,
             "identity": self.identity.safe_summary() if self.identity else None,
             "failure": self.failure.to_dict() if self.failure else None,

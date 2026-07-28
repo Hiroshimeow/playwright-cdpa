@@ -10,7 +10,7 @@ from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .errors import AmbiguousOutcomeError, BackendError, SchemaDriftError
-from .frontend import find_send_button
+from .frontend import click_send_atomic
 from .models import TurnIdentity
 from .schema import decode_identifier, decode_optional_identifier
 
@@ -53,19 +53,27 @@ def _transport_string(
 def is_real_conversation_response(response: Any) -> bool:
     try:
         parsed = urlparse(str(response.url))
+        port = parsed.port
         return (
             response.request.method == "POST"
+            and parsed.scheme == "https"
             and (parsed.hostname or "").casefold() in {"chatgpt.com", "www.chatgpt.com"}
+            and parsed.username is None
+            and parsed.password is None
+            and port in {None, 443}
             and parsed.path == "/backend-api/f/conversation"
+            and not parsed.params
+            and not parsed.query
+            and not parsed.fragment
         )
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return False
 
 
 def reduce_request_payload(request: Any) -> FrontendAcceptance:
     try:
         value = json.loads(request.post_data or "{}")
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         value = {}
     payload = value if isinstance(value, dict) else {}
     raw_metadata = payload.get("metadata")
@@ -193,15 +201,20 @@ def reduce_handoff(text: str, acceptance: FrontendAcceptance) -> FrontendHandoff
 async def send_real(
     page: Page,
     *,
+    prompt: str,
+    target_conversation_id: str | None,
     send_timeout: float,
     on_accepted: AcceptedCallback,
 ) -> FrontendHandoff:
-    button = await find_send_button(page)
     try:
         async with page.expect_response(
             is_real_conversation_response, timeout=send_timeout * 1000
         ) as response_info:
-            await button.click()
+            await click_send_atomic(
+                page,
+                prompt,
+                conversation_id=target_conversation_id,
+            )
         response = await response_info.value
     except PlaywrightTimeoutError as exc:
         raise AmbiguousOutcomeError(

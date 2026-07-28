@@ -52,7 +52,6 @@ class CoreConfig:
     identity_timeout: float = 30.0
     stable_samples: int = 2
     stable_seconds: float = 0.5
-    keep_helper_tab: bool = False
 
     @property
     def normalized_cdp_endpoint(self) -> str:

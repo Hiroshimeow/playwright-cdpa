@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
 from .config import CoreConfig
@@ -31,7 +32,6 @@ def _shared(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--coordination-dir")
     parser.add_argument("--deployment-id")
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--keep-helper-tab", action="store_true")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,20 +43,21 @@ def build_parser() -> argparse.ArgumentParser:
     target = send.add_mutually_exclusive_group(required=True)
     target.add_argument("--fresh", action="store_true")
     target.add_argument("--conversation")
-    send.add_argument("--wait-idle", action="store_true")
+    send.add_argument("--request-id")
     _shared(send)
 
-    watch = sub.add_parser("watch", help="watch an exact persisted request")
-    watch.add_argument("request_id")
-    _shared(watch)
+    get = sub.add_parser("get", help="wait for and return an exact persisted request")
+    get.add_argument("request_id")
+    _shared(get)
+
+    status = sub.add_parser("status", help="read local request metadata only")
+    status.add_argument("request_id")
+    _shared(status)
 
     cancel = sub.add_parser("cancel", help="request exact-turn cancellation")
     cancel.add_argument("request_id")
     _shared(cancel)
 
-    get = sub.add_parser("get", help="read persisted request metadata")
-    get.add_argument("request_id")
-    _shared(get)
     return parser
 
 
@@ -70,7 +71,6 @@ def _config(args: argparse.Namespace) -> CoreConfig:
         poll=args.poll,
         send_timeout=args.send_timeout,
         identity_timeout=args.identity_timeout,
-        keep_helper_tab=args.keep_helper_tab,
     ).validated()
 
 
@@ -81,20 +81,18 @@ async def _run(args: argparse.Namespace) -> Result:
             args.prompt,
             fresh=args.fresh,
             conversation=args.conversation,
-            wait_idle=args.wait_idle,
+            request_id=args.request_id,
         )
-    if args.command == "watch":
-        return await core.watch(args.request_id)
+    if args.command == "get":
+        return await core.get(args.request_id)
+    if args.command == "status":
+        return core.status(args.request_id)
     if args.command == "cancel":
         return await core.cancel(args.request_id)
-    if args.command == "get":
-        return core.get(args.request_id)
     raise InvalidInputError(f"unsupported command {args.command}")
 
 
 def exit_code(result: Result, *, command: str) -> int:
-    if command == "get" and result.failure is None:
-        return EXIT_SUCCESS
     if result.state == TurnState.CANCELLED:
         return EXIT_CANCELLED
     if command == "cancel" and result.state == TurnState.COMPLETE:
@@ -106,19 +104,22 @@ def exit_code(result: Result, *, command: str) -> int:
         return EXIT_AMBIGUOUS
     if failure.category == FailureCategory.INVALID_INPUT:
         return EXIT_INVALID
-    if failure.category == FailureCategory.OWNERSHIP:
+    if result.disposition == "ownership_timeout":
         return EXIT_OWNERSHIP
-    if failure.category == FailureCategory.CANCELLATION_UNPROVEN:
+    if result.disposition == "cancellation_unproven":
         return EXIT_CANCELLATION_UNPROVEN
-    if failure.category in {
-        FailureCategory.TIMEOUT,
-        FailureCategory.AMBIGUOUS_OUTCOME,
-        FailureCategory.IDENTITY_MISSING,
-        FailureCategory.GRAPH_AMBIGUOUS,
-        FailureCategory.GRAPH_CONVERGENCE,
-    }:
+    if result.disposition == "get_required":
+        if failure.category in {
+            FailureCategory.TIMEOUT,
+            FailureCategory.AMBIGUOUS_OUTCOME,
+        }:
+            return EXIT_AMBIGUOUS
+        if failure.disposition == "invariant_failure":
+            return EXIT_INVARIANT
+        if failure.disposition == "external_failure":
+            return EXIT_RECOVERABLE_EXTERNAL if failure.retryable else EXIT_TERMINAL_EXTERNAL
         return EXIT_AMBIGUOUS
-    if failure.external:
+    if result.disposition == "external_failure":
         return EXIT_RECOVERABLE_EXTERNAL if failure.retryable else EXIT_TERMINAL_EXTERNAL
     return EXIT_INVARIANT
 
@@ -148,12 +149,13 @@ def _error_result(exc: BaseException) -> Result:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    effective_argv = list(argv) if argv is not None else list(sys.argv[1:])
+    args = parser.parse_args(effective_argv)
     try:
         result = asyncio.run(_run(args))
     except KeyboardInterrupt:
         return 130
-    except BaseException as exc:
+    except Exception as exc:  # noqa: BLE001
         result = _error_result(exc)
     _render(result, json_mode=args.json)
     return exit_code(result, command=args.command)

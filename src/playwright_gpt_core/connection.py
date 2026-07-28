@@ -1,23 +1,32 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import TracebackType
 
 from playwright.async_api import (
     Browser,
     BrowserContext,
-    Error as PlaywrightError,
     Page,
     Playwright,
     async_playwright,
+)
+from playwright.async_api import (
+    Error as PlaywrightError,
+)
+from playwright.async_api import (
+    TimeoutError as PlaywrightTimeoutError,
 )
 
 from .config import CoreConfig
 from .errors import (
     BrowserOfflineError,
     ConflictingIdentityError,
+    InvalidInputError,
     NetworkError,
+    OperationTimeoutError,
     SchemaDriftError,
 )
+from .targets import conversation_url, normalize_conversation
 
 
 class BrowserSession:
@@ -27,7 +36,7 @@ class BrowserSession:
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
 
-    async def __aenter__(self) -> BrowserSession:
+    async def __aenter__(self) -> BrowserSession:  # noqa: PYI034
         self.playwright = await async_playwright().start()
         try:
             self.browser = await self.playwright.chromium.connect_over_cdp(
@@ -60,6 +69,13 @@ class BrowserSession:
         self.context = None
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationPage:
+    page: Page
+    target_id: str
+    owned: bool
+
+
 async def page_target_id(context: BrowserContext, page: Page) -> str:
     """Return the Chromium target ID for one exact page without exposing page content."""
     try:
@@ -82,9 +98,76 @@ async def page_target_id(context: BrowserContext, page: Page) -> str:
     return target_id
 
 
-async def close_page_by_target_id(
-    context: BrowserContext, target_id: str
-) -> bool:
+async def resolve_conversation_page(
+    context: BrowserContext,
+    conversation_id: str,
+    *,
+    preferred_target_id: str | None = None,
+) -> ConversationPage:
+    """Borrow one exact conversation page or open one exact owned helper."""
+    exact: list[tuple[Page, str]] = []
+    preferred: tuple[Page, str] | None = None
+    for page in list(context.pages):
+        if page.is_closed():
+            continue
+        target_id = await page_target_id(context, page)
+        try:
+            page_conversation_id = normalize_conversation(page.url)
+        except InvalidInputError:
+            page_conversation_id = None
+        if preferred_target_id is not None and target_id == preferred_target_id:
+            preferred = (page, target_id)
+            if page_conversation_id != conversation_id:
+                raise ConflictingIdentityError(
+                    "persisted helper target is not the exact conversation page"
+                )
+        if page_conversation_id == conversation_id:
+            exact.append((page, target_id))
+
+    if len(exact) > 1:
+        raise ConflictingIdentityError("multiple browser pages matched the exact conversation")
+    if preferred is not None:
+        return ConversationPage(preferred[0], preferred[1], True)
+    if exact:
+        page, target_id = exact[0]
+        return ConversationPage(page, target_id, False)
+
+    try:
+        page = await context.new_page()
+    except PlaywrightTimeoutError as exc:
+        raise OperationTimeoutError("creating an exact conversation page timed out") from exc
+    except PlaywrightError as exc:
+        raise NetworkError("could not create an exact conversation page") from exc
+    try:
+        target_id = await page_target_id(context, page)
+        try:
+            await page.goto(
+                conversation_url(conversation_id),
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+        except PlaywrightTimeoutError as exc:
+            raise OperationTimeoutError("exact conversation page navigation timed out") from exc
+        except PlaywrightError as exc:
+            raise NetworkError("could not navigate to the exact conversation page") from exc
+        try:
+            resolved_id = normalize_conversation(page.url)
+        except InvalidInputError as exc:
+            raise ConflictingIdentityError(
+                "new helper did not remain on an exact conversation URL"
+            ) from exc
+        if resolved_id != conversation_id:
+            raise ConflictingIdentityError("new helper resolved to a different conversation")
+        return ConversationPage(page, target_id, True)
+    except Exception:
+        try:
+            await page.close()
+        except PlaywrightError:
+            pass
+        raise
+
+
+async def close_page_by_target_id(context: BrowserContext, target_id: str) -> bool:
     """Close only the page with the exact durable Chromium target ID."""
     if not target_id or len(target_id) > 256:
         raise SchemaDriftError("invalid persisted helper target ID")
@@ -101,5 +184,10 @@ async def close_page_by_target_id(
         )
     if not matches:
         return False
-    await matches[0].close()
+    try:
+        await matches[0].close()
+    except PlaywrightTimeoutError as exc:
+        raise OperationTimeoutError("closing the exact helper page timed out") from exc
+    except PlaywrightError as exc:
+        raise NetworkError("could not close the exact helper page") from exc
     return True

@@ -18,12 +18,27 @@ def normalize_conversation(value: str) -> str:
         conversation_id = raw.strip("/")
     else:
         parsed = urlparse(raw)
-        if (parsed.hostname or "").casefold() not in {"chatgpt.com", "www.chatgpt.com"}:
-            raise InvalidInputError("conversation URL must use chatgpt.com")
-        parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) != 2 or parts[0] != "c":
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise InvalidInputError("conversation URL has an invalid port") from exc
+        supported_origin = (
+            parsed.scheme == "https"
+            and (parsed.hostname or "").casefold() in {"chatgpt.com", "www.chatgpt.com"}
+            and parsed.username is None
+            and parsed.password is None
+            and port in {None, 443}
+        )
+        if not supported_origin:
+            raise InvalidInputError("conversation URL must use exact HTTPS ChatGPT origin")
+        if parsed.params or parsed.query or parsed.fragment:
+            raise InvalidInputError(
+                "conversation URL must not contain params, query, or fragment"
+            )
+        match = re.fullmatch(r"/c/([A-Za-z0-9_-]{8,160})", parsed.path)
+        if match is None:
             raise InvalidInputError("conversation URL must be https://chatgpt.com/c/<id>")
-        conversation_id = parts[1]
+        conversation_id = match.group(1)
     if not _CONVERSATION_ID.fullmatch(conversation_id):
         raise InvalidInputError("invalid conversation ID")
     return conversation_id

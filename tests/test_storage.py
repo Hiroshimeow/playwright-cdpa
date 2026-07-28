@@ -5,7 +5,7 @@ import json
 import pytest
 
 from playwright_gpt_core.errors import CorruptStateError, Failure, FailureCategory
-from playwright_gpt_core.models import TurnIdentity, TurnRecord, TurnState
+from playwright_gpt_core.models import Result, TurnIdentity, TurnRecord, TurnState
 from playwright_gpt_core.storage import StateStore
 
 
@@ -36,6 +36,32 @@ def test_failure_diagnostic_is_sanitized_before_state_write(tmp_path) -> None:
 
     assert "do-not-print" not in raw
     assert "<redacted>" in raw
+
+
+def test_legacy_ownership_failure_strictly_decodes_as_invariant(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    record = TurnRecord.new(request_id="legacy-ownership", prompt="prompt").transition(
+        TurnState.FAILED,
+        failure=Failure(
+            FailureCategory.OWNERSHIP,
+            "legacy ownership conflict",
+            retryable=True,
+        ),
+    )
+
+    store.create(record)
+    loaded = store.load(record.request_id)
+    assert loaded.failure is not None
+    assert loaded.failure.category == FailureCategory.OWNERSHIP
+    assert (
+        Result(
+            1,
+            loaded.request_id,
+            loaded.state,
+            failure=loaded.failure,
+        ).disposition
+        == "invariant_failure"
+    )
 
 
 def test_corrupt_state_is_preserved_and_rejected(tmp_path) -> None:

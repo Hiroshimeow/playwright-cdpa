@@ -24,22 +24,23 @@ def test_cli_acceptance_surface_requires_explicit_target() -> None:
     args = parser.parse_args(["send", "Reply OK", "--fresh", "--json"])
     assert args.command == "send"
     assert args.fresh is True
-    args = parser.parse_args(["watch", "req-1", "--json"])
-    assert args.command == "watch"
+    args = parser.parse_args(["get", "req-1", "--json"])
+    assert args.command == "get"
+    args = parser.parse_args(["status", "req-1", "--json"])
+    assert args.command == "status"
     args = parser.parse_args(
         [
             "send",
             "next",
             "--conversation",
             "conversation-1",
-            "--wait-idle",
             "--coordination-dir",
             "/tmp/shared-coordination",
             "--deployment-id",
             "profile-9222",
         ]
     )
-    assert args.wait_idle is True
+    assert not hasattr(args, "wait_idle")
     assert args.coordination_dir == "/tmp/shared-coordination"
     assert args.deployment_id == "profile-9222"
 
@@ -53,7 +54,7 @@ def test_stable_exit_codes() -> None:
                 1,
                 "r",
                 TurnState.FAILED,
-                failure=Failure(FailureCategory.OWNERSHIP, "busy", True),
+                failure=Failure(FailureCategory.OWNERSHIP_TIMEOUT, "busy", True),
             ),
             command="send",
         )
@@ -73,15 +74,50 @@ def test_stable_exit_codes() -> None:
     )
 
 
-def test_get_json_outputs_one_machine_readable_object(tmp_path, capsys) -> None:
-    store = StateStore(tmp_path)
-    store.save(TurnRecord.new(request_id="req-1", prompt="secret prompt"))
-    code = main(["get", "req-1", "--state-dir", str(tmp_path), "--json"])
+def test_get_json_waits_for_exact_result(monkeypatch, capsys) -> None:
+    import playwright_gpt_core.cli as cli_module
+
+    class Core:
+        def __init__(self, _config) -> None:
+            pass
+
+        async def get(self, request_id: str) -> Result:
+            return Result(1, request_id, TurnState.COMPLETE, response="EXACT_OK")
+
+    monkeypatch.setattr(cli_module, "ChatGPTCore", Core)
+
+    code = main(["get", "req-1", "--json"])
     output = capsys.readouterr().out.strip()
     assert code == 0
     value = json.loads(output)
     assert value["request_id"] == "req-1"
-    assert "secret prompt" not in output
+    assert value["response"] == "EXACT_OK"
+
+
+@pytest.mark.parametrize("command", ["watch", "recover"])
+def test_retired_command_aliases_are_rejected(command, capsys) -> None:
+    with pytest.raises(SystemExit) as captured:
+        main([command, "req-alias", "--json"])
+
+    assert captured.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["send", "prompt", "--fresh", "--request-id", ""],
+        ["get", "../escape"],
+    ],
+)
+def test_invalid_request_ids_return_public_invalid_input(argv, tmp_path, capsys) -> None:
+    code = main([*argv, "--state-dir", str(tmp_path / "state"), "--json"])
+    value = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert value["disposition"] == "invalid_input"
+    assert value["failure"]["category"] == "invalid_input"
+    assert not (tmp_path / "state").exists()
 
 
 def test_missing_get_returns_invalid_exit_and_json_failure(tmp_path, capsys) -> None:
@@ -191,7 +227,7 @@ def test_recoverable_backend_failure_maps_to_exit_ten() -> None:
             external=True,
         ),
     )
-    assert exit_code(result, command="watch") == 10
+    assert exit_code(result, command="get") == 10
 
 
 def test_get_rejects_string_failure_flags_as_corrupt_state(tmp_path, capsys) -> None:

@@ -87,6 +87,108 @@ def test_coordination_state_is_private_and_contains_no_result_store_path(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_deadline_claim_does_not_bypass_held_conversation_lock(
+    tmp_path, monkeypatch
+) -> None:
+    coordination = tmp_path / "coordination"
+    owner = ChatGPTCore(
+        CoreConfig(
+            state_dir=tmp_path / "owner-state",
+            coordination_dir=coordination,
+            deployment_id="shared-browser",
+        )
+    )
+    contender = ChatGPTCore(
+        CoreConfig(
+            state_dir=tmp_path / "contender-state",
+            coordination_dir=coordination,
+            deployment_id="shared-browser",
+            timeout=0.01,
+            poll=0.001,
+        )
+    )
+    owner.coordination.claim("conversation-1", "foreign-request")
+
+    async def forbidden_send_record(*_args, **_kwargs):
+        raise AssertionError("losing contender must not create or send a local request")
+
+    monkeypatch.setattr(ChatGPTCore, "_send_record", forbidden_send_record)
+
+    with owner.coordination.lock("conversation-1", timeout=0):
+        owner.coordination.release("conversation-1", "foreign-request", terminal=True)
+        result = await contender.send(
+            "next",
+            conversation="conversation-1",
+            request_id="contender-request",
+        )
+        assert contender.coordination.load("conversation-1").active_request_id is None
+
+    assert result.disposition == "ownership_timeout"
+    assert not contender.store.turn_path("contender-request").exists()
+
+
+@pytest.mark.asyncio
+async def test_owner_release_at_deadline_gets_final_atomic_claim(tmp_path, monkeypatch) -> None:
+    import playwright_gpt_core.service as service_module
+
+    coordination = tmp_path / "coordination"
+    owner = ChatGPTCore(
+        CoreConfig(
+            state_dir=tmp_path / "owner-state",
+            coordination_dir=coordination,
+            deployment_id="shared-browser",
+        )
+    )
+    contender = ChatGPTCore(
+        CoreConfig(
+            state_dir=tmp_path / "contender-state",
+            coordination_dir=coordination,
+            deployment_id="shared-browser",
+            timeout=1,
+            poll=0.1,
+        )
+    )
+    owner.coordination.claim("conversation-1", "foreign-request")
+    from types import SimpleNamespace
+
+    ticks = iter([0.0, 0.0, 0.5, 2.0, 2.0])
+
+    def monotonic() -> float:
+        return next(ticks, 2.0)
+
+    original_lock = contender.coordination.lock
+    attempts = 0
+
+    def release_after_first_attempt(conversation_id: str, *, timeout: float = 0.0):
+        nonlocal attempts
+        lock = original_lock(conversation_id, timeout=timeout)
+
+        class ReleasingLock:
+            def __enter__(self):
+                return lock.__enter__()
+
+            def __exit__(self, exc_type, exc, traceback):
+                nonlocal attempts
+                lock.__exit__(exc_type, exc, traceback)
+                attempts += 1
+                if attempts == 1:
+                    owner.coordination.release(
+                        "conversation-1", "foreign-request", terminal=True
+                    )
+
+        return ReleasingLock()
+
+    monkeypatch.setattr(service_module, "time", SimpleNamespace(monotonic=monotonic))
+    monkeypatch.setattr(contender.coordination, "lock", release_after_first_attempt)
+
+    await contender._claim_when_idle("conversation-1", "contender-request")
+
+    assert (
+        contender.coordination.load("conversation-1").active_request_id == "contender-request"
+    )
+
+
+@pytest.mark.asyncio
 async def test_foreign_claim_fails_without_loading_foreign_turn_state(tmp_path) -> None:
     coordination = tmp_path / "coordination"
     owner = ChatGPTCore(
@@ -101,14 +203,24 @@ async def test_foreign_claim_fails_without_loading_foreign_turn_state(tmp_path) 
             state_dir=tmp_path / "repo-b",
             coordination_dir=coordination,
             deployment_id="shared-browser",
+            timeout=0.01,
+            poll=0.001,
         )
     )
     owner.coordination.claim("conversation-1", "foreign-request")
 
-    with pytest.raises(OwnershipConflictError, match="foreign-request"):
-        await contender.send("next", conversation="conversation-1")
+    result = await contender.send(
+        "next", conversation="conversation-1", request_id="contender-request"
+    )
 
+    from playwright_gpt_core.cli import EXIT_OWNERSHIP, exit_code
+
+    assert result.disposition == "ownership_timeout"
+    assert result.failure is not None
+    assert result.failure.category.value == "ownership_timeout"
+    assert exit_code(result, command="send") == EXIT_OWNERSHIP
     assert not contender.store.turn_path("foreign-request").exists()
+    assert not contender.store.turn_path("contender-request").exists()
 
 
 @pytest.mark.asyncio
@@ -132,14 +244,20 @@ async def test_wait_idle_polls_shared_claim_without_foreign_state_lookup(tmp_pat
     )
     owner.coordination.claim("conversation-1", "foreign-request")
 
-    with pytest.raises(OwnershipConflictError, match="remains owned"):
-        await contender.send(
-            "next",
-            conversation="conversation-1",
-            wait_idle=True,
-        )
+    result = await contender.send(
+        "next",
+        conversation="conversation-1",
+        request_id="waiting-request",
+    )
 
+    from playwright_gpt_core.cli import EXIT_OWNERSHIP, exit_code
+
+    assert result.disposition == "ownership_timeout"
+    assert result.failure is not None
+    assert result.failure.category.value == "ownership_timeout"
+    assert exit_code(result, command="send") == EXIT_OWNERSHIP
     assert not contender.store.turn_path("foreign-request").exists()
+    assert not contender.store.turn_path("waiting-request").exists()
 
 
 @pytest.mark.parametrize(

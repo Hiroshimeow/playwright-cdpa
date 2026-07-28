@@ -24,7 +24,21 @@ class FailureCategory(str, Enum):
     INVARIANT = "invariant"
     CORRUPT_STATE = "corrupt_state"
     OWNERSHIP = "ownership"
+    OWNERSHIP_TIMEOUT = "ownership_timeout"
     CANCELLATION_UNPROVEN = "cancellation_unproven"
+
+
+_INVARIANT_FAILURE_CATEGORIES = frozenset(
+    {
+        FailureCategory.SCHEMA_DRIFT,
+        FailureCategory.IDENTITY_MISSING,
+        FailureCategory.IDENTITY_CONFLICT,
+        FailureCategory.GRAPH_AMBIGUOUS,
+        FailureCategory.GRAPH_CONVERGENCE,
+        FailureCategory.INVARIANT,
+        FailureCategory.CORRUPT_STATE,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,12 +50,24 @@ class Failure:
 
     def __post_init__(self) -> None:
         if not isinstance(self.category, FailureCategory):
-            raise ValueError("failure category must be a FailureCategory")
+            raise TypeError("failure category must be a FailureCategory")
         if type(self.message) is not str:
             raise ValueError("failure message must be exactly a string")
         if type(self.retryable) is not bool or type(self.external) is not bool:
             raise ValueError("failure flags must be exactly boolean")
         object.__setattr__(self, "message", sanitize_diagnostic(self.message))
+
+    @property
+    def disposition(self) -> str:
+        if self.category == FailureCategory.INVALID_INPUT:
+            return "invalid_input"
+        if self.category == FailureCategory.OWNERSHIP_TIMEOUT:
+            return "ownership_timeout"
+        if self.category == FailureCategory.CANCELLATION_UNPROVEN:
+            return "cancellation_unproven"
+        if self.category in _INVARIANT_FAILURE_CATEGORIES or not self.external:
+            return "invariant_failure"
+        return "external_failure"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -105,7 +131,6 @@ class BackendUnavailableError(BackendError):
 
 class SchemaDriftError(CoreError):
     category = FailureCategory.SCHEMA_DRIFT
-    external = True
 
 
 class UnsupportedOperationError(CoreError):
@@ -153,6 +178,11 @@ class ConcurrentStateError(CoreError):
 
 class OwnershipConflictError(CoreError):
     category = FailureCategory.OWNERSHIP
+    retryable = True
+
+
+class OwnerWaitTimeoutError(CoreError):
+    category = FailureCategory.OWNERSHIP_TIMEOUT
     retryable = True
 
 

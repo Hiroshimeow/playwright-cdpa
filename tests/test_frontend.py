@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.frontend import _find_visible
+from playwright_gpt_core.frontend import _find_visible, click_send_atomic, observe_frontend
 
 
 class Locator:
@@ -35,3 +35,58 @@ async def test_find_visible_waits_for_late_hydration_without_count_gate() -> Non
     page = Page()
     locator = await _find_visible(page, ("late",), "composer", 5000)  # type: ignore[arg-type]
     assert locator.waited is True
+
+
+class StatePage:
+    url = "https://chatgpt.com/c/conversation-1"
+
+    async def evaluate(self, _script: str):
+        return {
+            "composer_present": True,
+            "composer_editable": True,
+            "composer_text": "queued prompt",
+            "attachment_count": 0,
+            "send_visible": True,
+            "send_enabled": True,
+            "stop_visible": True,
+            "choice_prompt": False,
+        }
+
+
+@pytest.mark.asyncio
+async def test_observe_frontend_reports_steering_ready_state() -> None:
+    state = await observe_frontend(StatePage())  # type: ignore[arg-type]
+    assert state.url == "https://chatgpt.com/c/conversation-1"
+    assert state.composer_text == "queued prompt"
+    assert state.send_ready is True
+    assert state.stop_visible is True
+    assert state.attachment_count == 0
+
+
+class AtomicScriptPage:
+    def __init__(self) -> None:
+        self.script = ""
+        self.payload = None
+
+    async def evaluate(self, script: str, payload):
+        self.script = script
+        self.payload = payload
+        return {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_atomic_send_rejects_query_and_fragment_in_browser_callback() -> None:
+    page = AtomicScriptPage()
+
+    await click_send_atomic(
+        page,  # type: ignore[arg-type]
+        "prompt",
+        conversation_id="conversation-1",
+    )
+
+    assert "current.search === ''" in page.script
+    assert "current.hash === ''" in page.script
+    assert page.payload == {
+        "prompt": "prompt",
+        "conversation_id": "conversation-1",
+    }

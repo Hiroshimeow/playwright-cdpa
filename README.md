@@ -1,23 +1,23 @@
 # playwright-gpt-core
 
-A fail-closed Python execution core for ChatGPT Web running in an existing persistent Chromium exposed through CDP.
+`playwright-gpt-core` is a fail-closed Python execution core for ChatGPT Web in an existing persistent Chromium exposed through loopback CDP.
 
-The core uses the real ChatGPT composer and the real Send/Stop controls. It observes the unchanged frontend request/response, persists staged turn identity, monitors the authenticated conversation graph, and returns success only when the final response is proven to belong to the exact submitted or attached turn.
+It uses the real ChatGPT composer and real Send/Stop controls, observes the unmodified frontend request/response, persists an irreversible Send boundary, resolves the exact conversation graph turn, and returns success only when the final assistant response is proven to belong to that request.
 
-## Safety properties
+## Safety contract
 
 - Connects only to a loopback CDP endpoint by default: `http://127.0.0.1:9222`.
-- Never calls `browser.close()` on the persistent browser.
-- Never installs request interception, aborts, fulfills, mutates, or replays the conversation POST.
-- Persists the click boundary before the real Send click.
-- Never retries automatically after an uncertain Send. Structural recovery of an existing conversation requires the persisted pre-Send baseline projection to match exact lowercase SHA-256 fingerprints, exactly one new user child below the anchor across the complete graph, and exactly one post-baseline user on the current branch before any identity can be bound.
-- Resolves only the exact current graph branch below the persisted user node.
-- Re-evaluates mutable nodes and requires consecutive bounded post-`COMPLETE` convergence; any nonterminal, missing-graph, unresolvable, or raw-content-changing observation resets the candidate window. Convergence fingerprints hash exact allowlisted in-memory graph material and expose only digests.
-- Keeps access tokens and authorization headers in memory only.
-- Persists prompt digest and length, not prompt body.
-- Uses atomic JSON replacement, file and directory `fsync`, record revisions, and POSIX file locks. Nested durable identity objects use an exact field schema; unknown or missing fields are preserved as corrupt state rather than normalized away.
-- Separates repository-local turn results from deployment-wide conversation ownership, so clients with different `state_dir` values still serialize mutation of the same CDP conversation.
-- Persists the exact Chromium helper target ID and keep/closed policy; recovery never closes a tab by URL matching.
+- Never calls `browser.close()`.
+- Never intercepts, aborts, fulfills, mutates, or replays the conversation POST.
+- Persists `CLICK_BOUNDARY_ENTERED` before clicking the real Send control.
+- Never sends again after an uncertain click. Recovery uses the same request ID with `get`.
+- Existing-conversation `send` waits boundedly for the deployment-wide owner, atomically claims the conversation, and only then creates repository-local request state.
+- A foreign durable owner is never stolen or guessed stale.
+- Manual composer text, attachments, choice prompts, page replacement, duplicate exact tabs, ownership drift, cancellation drift, and user-graph drift fail closed before Send; the exact URL is rechecked in the same browser callback as the real click.
+- Send steering never clicks Stop. When a response is active, the prompt is filled once; the core sends only when the real Send button becomes enabled.
+- `get` never sends. It reuses one uniquely proven exact conversation page or opens the exact persisted conversation URL. Unrelated and duplicate tabs are never selected.
+- Helper-tab lifecycle is internal. Only a page created or durably owned by this core is eligible for automatic close; a pre-click manual text, attachment, or choice-prompt failure is durably preserved instead. Borrowed Send/get/cancel pages, unrelated tabs, and Chromium remain open.
+- Prompt bodies, response bodies, cookies, authorization material, access/resume/proof tokens, Sentinel/Turnstile values, and raw network payloads are not persisted.
 
 ## Install
 
@@ -25,50 +25,49 @@ The core uses the real ChatGPT composer and the real Send/Stop controls. It obse
 uv sync --all-groups
 ```
 
-The package requires Python 3.10 or newer. Cross-process locking currently requires a POSIX platform because it uses `fcntl.flock`.
+Python 3.10 or newer is required. Cross-process locking currently requires POSIX `fcntl.flock`.
 
-## CLI
+## Personal CLI flow
 
 Fresh conversation:
 
 ```bash
-uv run playwright-gpt send "Reply with exactly OK" --fresh
+uv run playwright-gpt send "Reply with exactly OK" \
+  --fresh \
+  --request-id personal-001
 ```
 
-Reuse a conversation ID or URL:
+Continue an exact conversation. Waiting for a foreign core owner is the default:
 
 ```bash
 uv run playwright-gpt send "Continue" \
-  --conversation '<conversation-id-or-https://chatgpt.com/c/...>'
+  --conversation '<conversation-id-or-https://chatgpt.com/c/...>' \
+  --request-id personal-002
 ```
 
-Attach to an exact persisted request without sending:
+Retrieve or wait for the exact final response without sending:
 
 ```bash
-uv run playwright-gpt watch '<request-id>'
+uv run playwright-gpt get personal-002
 ```
 
-Wait for the exact active request, revalidate idle state, then send:
+Read local metadata only; this does not connect to Chromium or change coordination:
 
 ```bash
-uv run playwright-gpt send "Next task" \
-  --conversation '<conversation-id>' \
-  --wait-idle
+uv run playwright-gpt status personal-002 --json
 ```
 
-Cancellation request:
+Request cancellation:
 
 ```bash
-uv run playwright-gpt cancel '<request-id>'
+uv run playwright-gpt cancel personal-002
 ```
 
-Machine-readable output:
+The complete command surface is `send`, `get`, `status`, and `cancel`. No retired command or library aliases are retained. There is no public `--wait-idle` or helper-tab retention option.
 
-```bash
-uv run playwright-gpt watch '<request-id>' --json
-```
+Caller-supplied request IDs are exact durable idempotency identities. They must contain 1-160 ASCII letters, digits, dot, underscore, or hyphen. Only `None` asks the Python API to generate a UUID; an empty or malformed explicit ID is invalid input.
 
-Shared options include:
+Shared CLI options:
 
 ```text
 --cdp-endpoint
@@ -80,27 +79,11 @@ Shared options include:
 --send-timeout
 --identity-timeout
 --json
---keep-helper-tab
 ```
 
-### Exit codes
+## Agent/application API flow
 
-| Code | Meaning |
-|---:|---|
-| 0 | Exact success, successful `get`, or cancel of an already complete request |
-| 2 | Invalid input or configuration |
-| 10 | Recoverable external failure |
-| 11 | Terminal external failure |
-| 12 | Timeout, missing proof, or ambiguous outcome requiring watch/recovery |
-| 20 | Local invariant, schema, or state failure |
-| 21 | Ownership/concurrency conflict |
-| 22 | Cancellation positively represented |
-| 23 | Cancellation requested but not proven |
-| 130 | Interrupted by the operator |
-
-JSON mode writes exactly one result object to stdout. Diagnostics are not mixed into stdout.
-
-## Python API
+The Python API is authoritative. CLI JSON is a thin adapter over the same methods and result model.
 
 ```python
 import asyncio
@@ -114,25 +97,26 @@ async def main() -> None:
         CoreConfig(
             cdp_endpoint="http://127.0.0.1:9222",
             state_dir=Path(".playwright-gpt"),
-            # Optional override. The default is shared under the user state
-            # directory and namespaced by the normalized CDP endpoint.
             coordination_dir=Path("/var/tmp/playwright-gpt-coordination"),
             deployment_id="shared-cdp-9222",
-            timeout=1800,
-            poll=1.0,
+            timeout=300,
+            poll=0.5,
         )
     )
 
-    result = await core.send(
+    sent = await core.send(
         "Reply with exactly OK",
         fresh=True,
+        request_id="caller-owned-id-001",
     )
-    if not result.success:
-        raise RuntimeError(result.failure)
-    print(result.response)
+    if sent.disposition == "get_required":
+        sent = await core.get(sent.request_id)
+    if not sent.success:
+        raise RuntimeError(sent.failure)
+    print(sent.response)
 
-    attached = await core.watch(result.request_id)
-    print(attached.state)
+    metadata = core.status(sent.request_id)
+    print(metadata.state, metadata.disposition)
 
 
 asyncio.run(main())
@@ -140,26 +124,62 @@ asyncio.run(main())
 
 Primary methods:
 
-- `send(...)`
-- `wait_idle_and_send(...)`
-- `watch(request_id)`
-- `recover(request_id)`
-- `cancel(request_id)`
-- `get(request_id)`
+- `await send(prompt, fresh=True, request_id=...)`
+- `await send(prompt, conversation=..., request_id=...)`
+- `await get(request_id)`
+- `status(request_id)`
+- `await cancel(request_id)`
 
-Transport, state, graph resolution, locking, and browser behavior are implemented below the API and are not duplicated in the CLI.
+No retired command or library aliases are retained. Callers use `get` for active result retrieval and `send` for submission.
+
+## Result dispositions
+
+| Disposition | Meaning |
+|---|---|
+| `complete` | Exact final response returned. |
+| `invalid_input` | Caller input failed the public boundary; no browser or coordination mutation occurred. |
+| `get_required` | Same-ID `get` may wait/recover; never resend. |
+| `external_failure` | Browser, authentication, network, backend, or frontend external failure. |
+| `invariant_failure` | Schema, corrupt state, identity, graph, or local invariant failure. |
+| `ownership_timeout` | Foreign durable owner remained through the bounded wait; no local turn was created. |
+| `cancelled` | Cancellation was positively represented. |
+| `cancellation_unproven` | Cancellation was requested but could not be proven. |
+
+`UNKNOWN` always exposes `get_required`: the caller reuses the same request ID and never sends again. The nested failure remains the cause and determines whether the caller can retry immediately, must repair an invariant first, or observed an external outage. A terminal pre-click `FAILED` timeout is instead `external_failure`; same-ID `get` cannot recover a request that never crossed Send.
+
+Schema, identity, graph, corrupt-state, and local invariant failures are `invariant_failure` when terminal. If one occurs on an `UNKNOWN` request, disposition remains `get_required`, but exit 20 signals that code/state repair is required before retrying same-ID `get`.
+
+`ownership_timeout` is reserved for the initial bounded foreign-owner wait where no local request record was created. Duplicate request IDs and ownership conflicts after local state exists are `invariant_failure`. An owner mismatch during post-click cancellation is `cancellation_unproven`, because Stop was not performed or proven.
+
+### Exit codes
+
+| Code | Meaning |
+|---:|---|
+| 0 | Exact success, successful `get`, or cancel of an already complete request. |
+| 2 | Invalid input or configuration. |
+| 10 | Recoverable external cause. `UNKNOWN` JSON still reports `get_required`; terminal results report `external_failure`. |
+| 11 | Terminal external cause. |
+| 12 | Active or uncertain result requiring same-ID `get`, including UNKNOWN timeout/ambiguous outcome. |
+| 20 | Schema, identity, graph, corrupt-state, or local invariant failure; UNKNOWN retains `get_required` after repair. |
+| 21 | Initial foreign-owner wait timed out before any local request record was created. |
+| 22 | Cancellation positively represented. |
+| 23 | Cancellation requested but unproven. |
+| 130 | Operator interruption. |
+
+JSON mode writes one result object to stdout. Diagnostics are not mixed into stdout. Identity values are truncated in public output.
 
 ## Persistence and coordination
 
-Repository-local result state defaults to `.playwright-gpt/`:
+Repository-local request/result state defaults to:
 
 ```text
 .playwright-gpt/
 ├── turns/<request-id>.json
+├── conversations/*.json
 └── locks/*.lock
 ```
 
-Deployment-wide conversation ownership is separate. Its default base is an absolute `$XDG_STATE_HOME/playwright-gpt-core/coordination` when `XDG_STATE_HOME` is absolute, otherwise the core falls back to the OS account home under `~/.local/state/playwright-gpt-core/coordination`. That fallback home must itself be absolute; a relative `HOME` is rejected before any state, coordination, CDP, or browser operation. The validated configuration freezes the accepted base so later working-directory changes cannot move the coordination plane. It is namespaced by a digest of the normalized loopback CDP endpoint. `localhost`, `127.0.0.1`, and `::1` aliases for the same scheme and port use the same default namespace. Use `--deployment-id` when multiple persistent browser profiles share one endpoint, and use an absolute `--coordination-dir` when embedding clients must share an explicit location. An explicitly supplied relative coordination path is rejected during configuration validation before state directories, coordination records, CDP sessions, or browser mutations are created.
+Deployment-wide browser ownership is separate:
 
 ```text
 <coordination-base>/<deployment-id>/
@@ -167,13 +187,15 @@ Deployment-wide conversation ownership is separate. Its default base is an absol
 └── locks/*.lock
 ```
 
-The coordination plane contains only conversation ID, active request ID, terminal request marker, revision, and timestamp. It never contains a repository state path or turn payload. A stale owner is not guessed away: competing send, wait-idle, and cancel operations fail closed until the exact owner is resolved.
+Every process allowed to mutate the same CDP deployment must use one shared absolute coordination base and deployment ID. Different repositories may use different `state_dir` values, but they must not use different coordination namespaces for the same browser profile.
 
-State schema v4 contains allowlisted identity, state-machine provenance, the exact Chromium helper target ID and keep/closed lifecycle, hashes, lengths, revisions, timestamps, and sanitized failures. Every persisted scalar, enum, boolean, integer, hash, timestamp, identity, helper field, and cross-field state/provenance combination is decoded without coercion. A turn file is accepted only when its filename/requested ID exactly matches the embedded request ID. Assistant graph recipients must be explicit: final candidates require `recipient == "all"`, while tool-call assistants require an explicit non-`all` recipient. Invalid state or graph schema fails closed before browser mutation. State does not contain prompt bodies, response bodies, cookies, access tokens, authorization headers, or raw network payloads. Free-form sanitization uses the same normalized secret-label predicate for structured keys, assignments, query keys, and URL path contexts, including generic `*_secret`, `*_password`, credential/credentials, private/signing-key families, canonical secret-access-key labels, encryption-key and passphrase families, compact/camel variants, and marker-plus-payload path segments. Secret assignment parsing accepts bounded unquoted keys plus matching single- or double-quoted JSON/Python-style keys before `:` or `=`. Quoted keys use an escape-aware parser, decode valid JSON-style escapes before canonical normalization, accept printable bracket/punctuation/whitespace forms through 256 decoded characters, and fail closed on malformed, control-bearing, mismatched, or over-bound assignment keys. The same canonical decoder is applied to assignment-like keys whose matching close quote is missing. Because `:` and `=` are valid internal key separators, every bounded delimiter position on the physical line is evaluated from longest to shortest rather than trusting the first one; a truncated key is preserved only when every plausible decoded identity is valid and provably nonsecret, while invalid, over-bound, or secret-equivalent candidates redact the whole diagnostic. Quoted values are escape-aware: backslash-escaped characters do not terminate the value, while the true matching quote remains the boundary around `<redacted>`; an unterminated quoted secret fails closed through the remainder of the diagnostic. Valid JSON string/object/list diagnostics use one bounded canonical boundary. String roots are decoded with standard JSON semantics, passed through the same recursive nested-diagnostic and recognized escape-layer sanitizer as object/list string values, and re-encoded as valid JSON strings only when changed. Object/list diagnostics remain token-preserved rather than reserialized: a JSON-grammar traversal distinguishes real object keys from object, list, and nested-array values; actual JSON-text keys and the coerced text of every native Python `Mapping` key are classified through the same recognized escape layers to a fixed point, enforcing the 256-character printable bound at every layer without renaming the output key. Secret identities replace only their associated value. For native mappings, malformed, unprovable, or secret-bearing key tokens replace both the output key and value with `<redacted>`; any resulting output-key collision collapses the mapping to the same fail-closed placeholder. Every canonical key layer is also checked with the bounded plain-text secret-boundary predicate. Serialized JSON diagnostics containing Authorization, Proxy-Authorization, Cookie/Set-Cookie, Bearer/Basic, JWT, or secret-assignment material in a key token fail closed completely. Every string value is recursively checked for nested JSON-in-JSON and additional legal JSON escape layers, sanitized with the same plain-text boundaries, and re-encoded in place only when changed. The shared depth limit is 12; malformed, control-bearing, over-bound, over-depth, non-convergent, or structurally inconsistent input fails closed. Structured-looking input is classified before truncation: values larger than the bounded input budget (`4 * max_length`) never fall back to the unstructured scanner, with JSON string roots returning valid JSON `"<redacted>"` and object/list roots returning `<redacted>`. Unicode-escaped `:`/`=`, slash, quote, and backslash forms therefore cannot hide Authorization, Proxy-Authorization, Cookie, or Set-Cookie material while valid JSON syntax, key order, spacing, array siblings, and ordinary controls remain intact. Unquoted values consume through a comma, semicolon, ampersand, newline, independently recognized following assignment, or end of input; whitespace alone never terminates a passphrase redaction. Explicit `Authorization:` and `Proxy-Authorization:` header values are redacted through the complete physical line and every immediately following SP/HTAB-prefixed continuation line for every authentication scheme; no same-line suffix or folded parameter is treated as safe. Structured and quoted authorization, proxy-authorization, cookie, cookies, and set-cookie keys use the same whole-value classification across exact, bounded qualified, snake_case, kebab-case, camelCase, and compact header forms. Separated and compact qualified prefixes must be fully composed of approved request/response/network/direction/proxy/HTTP/header components; ordinary fields such as marketing cookies or legal authorization decisions remain visible. Signature, signed-URL signature, OAuth `code_verifier`, and `client_assertion` families use the shared normalized secret predicate across structured keys, assignments, and query parameters. Quoted assignment keys may additionally contain `.`, `:`, or `/`, so provider-qualified forms such as `"aws.secret_access_key"` cannot bypass classification. Explicit `Cookie:` and `Set-Cookie:` headers use the HTTP token alphabet for cookie names and are fully redacted before assignment parsing.
+For idempotent recovery, the same logical request must use the same result state root. Shared coordination serializes conversation mutation, but coordination is not a cross-repository result ledger; reusing one caller request ID under another `state_dir` does not recover the original local request record.
+
+State uses strict schemas, atomic replacement, file/directory `fsync`, revisions, and POSIX locks. Corrupt bytes are preserved and rejected before browser or ownership mutation. The coordination plane stores only conversation ownership metadata; it does not contain repository paths, prompts, responses, or browser credentials.
 
 ## Documentation
 
 - [Architecture and reliability contract](docs/architecture.md)
 - [Live facts and remaining assumptions](docs/live-facts-and-assumptions.md)
 - [Live acceptance evidence](docs/live-acceptance.md)
-- [Future CDPA adapter design](docs/cdpa-adapter.md)
+- [Future CDPA V2 adapter design](docs/cdpa-adapter.md)

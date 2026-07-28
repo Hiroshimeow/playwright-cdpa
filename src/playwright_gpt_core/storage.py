@@ -117,6 +117,21 @@ class StateStore:
             self._atomic_json(path, released.to_dict())
             return released
 
+    def release_conversation_if_owned(
+        self, conversation_id: str, request_id: str, *, terminal: bool
+    ) -> ConversationRecord:
+        with self.record_lock("conversation-record", conversation_id):
+            path = self.conversation_path(conversation_id)
+            current = self.load_conversation(conversation_id)
+            if current.active_request_id != request_id:
+                return current
+            released = replace(
+                current.release(request_id, terminal=terminal),
+                revision=current.revision + 1,
+            )
+            self._atomic_json(path, released.to_dict())
+            return released
+
     def find_by_conversation(self, conversation_id: str) -> list[TurnRecord]:
         if not self.turns_dir.exists():
             return []
