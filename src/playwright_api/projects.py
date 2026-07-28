@@ -113,6 +113,70 @@ class ProjectRecord:
         return cls(key, name, scope, value["creation_unknown"], project)
 
 
+class ProjectCreationGuard:
+    """Deployment-scoped metadata claim for the irreversible Create boundary."""
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root).expanduser().resolve()
+        self.records = self.root / "project-creation-claims"
+        self.locks = self.root / "project-creation-locks"
+
+    def lock(self, key: str, *, timeout: float = 0.0) -> FileLock:
+        key = _validate_project_key(key)
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return FileLock(self.locks / f"{digest}.lock", timeout=timeout)
+
+    def load(self, key: str) -> tuple[str, ProjectMemoryScope] | None:
+        key = _validate_project_key(key)
+        path = self._path(key)
+        if not path.exists():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(value, dict) or set(value) != {
+                "schema_version",
+                "key",
+                "name",
+                "memory_scope",
+            }:
+                raise ValueError("invalid fields")
+            if value["schema_version"] != 1 or _validate_project_key(value["key"]) != key:
+                raise ValueError("invalid identity")
+            name = _validate_project_name(value["name"])
+            scope = ProjectMemoryScope(value["memory_scope"])
+            return name, scope
+        except CorruptStateError:
+            raise
+        except Exception as exc:
+            raise CorruptStateError("corrupt deployment project creation claim") from exc
+
+    def claim(
+        self, *, key: str, name: str, memory_scope: ProjectMemoryScope
+    ) -> None:
+        key = _validate_project_key(key)
+        name = _validate_project_name(name)
+        if not isinstance(memory_scope, ProjectMemoryScope):
+            raise InvalidInputError("invalid project memory scope")
+        current = self.load(key)
+        if current is not None:
+            if current != (name, memory_scope):
+                raise ConflictingIdentityError("project key is bound to different metadata")
+            return
+        _atomic_write(
+            self._path(key),
+            {
+                "schema_version": 1,
+                "key": key,
+                "name": name,
+                "memory_scope": memory_scope.value,
+            },
+        )
+
+    def _path(self, key: str) -> Path:
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return self.records / f"{digest}.json"
+
+
 class ProjectRegistry:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
@@ -154,7 +218,7 @@ class ProjectRegistry:
                     raise ConflictingIdentityError("project key is bound to different metadata")
                 return current, False
             record = ProjectRecord(key, name, memory_scope, True, None)
-            self._write(self._path(key), record.to_dict())
+            _atomic_write(self._path(key), record.to_dict())
             return record, True
 
     def resolve(self, key: str, project: ProjectRef) -> ProjectRecord:
@@ -168,7 +232,7 @@ class ProjectRegistry:
             if current.project is not None and current.project != project:
                 raise ConflictingIdentityError("project key is already bound to another project")
             resolved = ProjectRecord(key, current.name, current.memory_scope, False, project)
-            self._write(self._path(key), resolved.to_dict())
+            _atomic_write(self._path(key), resolved.to_dict())
             return resolved
 
     def _path(self, key: str) -> Path:
@@ -179,22 +243,21 @@ class ProjectRegistry:
         digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
         return FileLock(self.locks / f"{digest}.lock", timeout=2.0)
 
-    @staticmethod
-    def _write(path: Path, value: dict[str, object]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+def _atomic_write(path: Path, value: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, path)
-        finally:
-            try:
-                os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
 
 
 def select_exact_project(

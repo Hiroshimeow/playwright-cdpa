@@ -15,6 +15,7 @@ caller / agent / CDPA adapter
 ChatGPTClient
   |-- StateStore             durable request/result records
   |-- ProjectRegistry        caller key -> exact project identity
+  |-- ProjectCreationGuard   deployment-wide Create claim/lock
   |-- CoordinationStore      deployment-wide mutation ownership
   |-- BrowserSession         borrowed loopback CDP connection
   |-- frontend/transport     real UI mutation + accepted identity
@@ -42,7 +43,7 @@ Processes recovering the same request must use the same `state_dir`.
 
 ### Coordination
 
-`coordination_dir/deployment_id` contains only deployment-wide ownership records and locks. Every process that can mutate the same Chromium profile must share this namespace.
+`coordination_dir/deployment_id` contains deployment-wide ownership records, locks, and the minimal Project key/name/scope claim needed to guard the irreversible Create boundary. It never stores exact Project result identity. Every process that can mutate the same Chromium profile must share this namespace.
 
 Different applications may use separate request state roots, but they must not use separate coordination namespaces for the same profile. Coordination prevents concurrent mutation; it cannot recover another application's request result.
 
@@ -109,14 +110,16 @@ File content is never persisted. Local canonical paths exist only in private dur
 
 `ensure_project(key, name, memory_scope)` behaves as follows:
 
-1. Reuse an already proven local key binding.
-2. List projects through the real `/projects` frontend.
-3. Select by exact name/ID only; never by card order, date, or fuzzy text.
-4. On zero exact matches, atomically persist an unknown-create marker before clicking Create.
-5. On one exact match, bind and reuse it.
-6. On multiple exact matches, fail closed.
-7. If a prior create is unknown, reconcile exact identity and never click Create a second time blindly.
-8. Persist the exact `g-p-*` identity as soon as the canonical project URL is proven.
+1. Acquire the deployment-scoped lock for the stable caller key.
+2. Reject key/name/scope conflicts against the shared Create claim.
+3. Reuse an already proven local key binding.
+4. List projects through the real `/projects` frontend.
+5. Select by exact name/ID only; never by card order, date, or fuzzy text.
+6. On zero exact matches, persist both the shared Create claim and local unknown-create marker immediately before clicking Create.
+7. On one exact match, bind the shared metadata claim and reuse the exact identity locally.
+8. On multiple exact matches, fail closed.
+9. If a prior create is unknown, reconcile exact identity and never click Create a second time blindly.
+10. Persist the exact `g-p-*` identity in the caller's `state_dir` as soon as the canonical project URL is proven.
 
 Project knowledge-file administration is outside this SDK. Composer attachments remain request-scoped.
 

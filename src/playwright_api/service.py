@@ -65,6 +65,7 @@ from .frontend import (
 )
 from .graph import GraphResolver, graph_fingerprints
 from .identity import discover_user_identity, merge_identity
+from .locking import FileLock
 from .models import (
     AttachmentStage,
     Result,
@@ -75,6 +76,7 @@ from .models import (
 )
 from .monitor import CandidateConvergence, monitor_live
 from .projects import (
+    ProjectCreationGuard,
     ProjectMemoryScope,
     ProjectRef,
     ProjectRegistry,
@@ -118,6 +120,7 @@ class ChatGPTClient:
         self.config = (config or ClientConfig()).validated()
         self.store = StateStore(self.config.state_dir)
         self.projects = ProjectRegistry(self.config.state_dir)
+        self.project_creations = ProjectCreationGuard(self.config.coordination_root)
         self._coordination: CoordinationStore | None = None
 
     @property
@@ -199,48 +202,89 @@ class ChatGPTClient:
     ) -> ProjectRef:
         if not isinstance(memory_scope, ProjectMemoryScope):
             raise InvalidInputError("invalid project memory scope")
-        existing = self.projects.load(key)
-        if existing is not None:
-            if existing.name != name or existing.memory_scope is not memory_scope:
-                raise ConflictingIdentityError("project key is bound to different metadata")
-            if existing.project is not None:
-                return existing.project
+        lock = await self._acquire_project_creation_lock(key)
+        try:
+            existing = self.projects.load(key)
+            if existing is not None:
+                if existing.name != name or existing.memory_scope is not memory_scope:
+                    raise ConflictingIdentityError("project key is bound to different metadata")
 
-        exact = await self._find_project(name=name)
-        if existing is not None:
-            if exact is None:
+            shared = self.project_creations.load(key)
+            if shared is not None and shared != (name, memory_scope):
+                raise ConflictingIdentityError("project key is bound to different metadata")
+
+            if existing is not None:
+                self.project_creations.claim(
+                    key=key,
+                    name=name,
+                    memory_scope=memory_scope,
+                )
+                if existing.project is not None:
+                    return existing.project
+
+            exact = await self._find_project(name=name)
+            if existing is not None:
+                if exact is None:
+                    raise AmbiguousOutcomeError(
+                        "project creation remains unknown; no second Create is allowed"
+                    )
+                return self.projects.resolve(key, exact).project or exact
+
+            if exact is not None:
+                if exact.name != name or exact.memory_scope is not memory_scope:
+                    raise ConflictingIdentityError(
+                        "existing project identity differs from requested metadata"
+                    )
+                self.project_creations.claim(
+                    key=key,
+                    name=name,
+                    memory_scope=memory_scope,
+                )
+                self.projects.begin_creation(
+                    key=key,
+                    name=name,
+                    memory_scope=memory_scope,
+                )
+                return self.projects.resolve(key, exact).project or exact
+
+            if shared is not None:
+                self.projects.begin_creation(
+                    key=key,
+                    name=name,
+                    memory_scope=memory_scope,
+                )
                 raise AmbiguousOutcomeError(
                     "project creation remains unknown; no second Create is allowed"
                 )
-            return self.projects.resolve(key, exact).project or exact
 
-        if exact is not None:
-            self.projects.begin_creation(
-                key=key,
-                name=name,
-                memory_scope=memory_scope,
-            )
-            return self.projects.resolve(key, exact).project or exact
-
-        def on_create_boundary() -> None:
-            _record, acquired = self.projects.claim_creation(
-                key=key,
-                name=name,
-                memory_scope=memory_scope,
-            )
-            if not acquired:
-                raise AmbiguousOutcomeError(
-                    "project creation is owned or unknown; reconcile before Create"
+            def on_create_boundary() -> None:
+                self.project_creations.claim(
+                    key=key,
+                    name=name,
+                    memory_scope=memory_scope,
                 )
+                _record, acquired = self.projects.claim_creation(
+                    key=key,
+                    name=name,
+                    memory_scope=memory_scope,
+                )
+                if not acquired:
+                    raise AmbiguousOutcomeError(
+                        "project creation is owned or unknown; reconcile before Create"
+                    )
 
-        created = await self._create_project(
-            name,
-            memory_scope,
-            on_create_boundary,
-        )
-        if created.name != name or created.memory_scope is not memory_scope:
-            raise ConflictingIdentityError("created project identity differs from requested metadata")
-        return self.projects.resolve(key, created).project or created
+            created = await self._create_project(
+                name,
+                memory_scope,
+                on_create_boundary,
+            )
+            if created.name != name or created.memory_scope is not memory_scope:
+                raise ConflictingIdentityError(
+                    "created project identity differs from requested metadata"
+                )
+            return self.projects.resolve(key, created).project or created
+        finally:
+            lock.release()
 
     async def open_project(self, project: ProjectRef) -> ChatTarget:
         if not isinstance(project, ProjectRef):
@@ -295,6 +339,21 @@ class ChatGPTClient:
                         await page.close()
                     except PlaywrightError:
                         pass
+
+    async def _acquire_project_creation_lock(self, key: str) -> FileLock:
+        deadline = time.monotonic() + self.config.timeout
+        while True:
+            lock = self.project_creations.lock(key, timeout=0.0)
+            try:
+                lock.acquire()
+                return lock
+            except OwnershipConflictError as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise OwnerWaitTimeoutError(
+                        "project creation guard remains owned by another process"
+                    ) from exc
+                await asyncio.sleep(min(self.config.poll, remaining))
 
     async def _claim_when_idle(self, conversation_id: str, request_id: str) -> None:
         deadline = time.monotonic() + self.config.timeout

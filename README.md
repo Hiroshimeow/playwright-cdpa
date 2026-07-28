@@ -108,7 +108,8 @@ result = await client.send(
 - zero exact matches: persist an unknown-create marker, then create once;
 - one exact match: reuse it;
 - more than one exact match: fail closed;
-- uncertain creation: reconcile exact identity and never click Create again blindly.
+- uncertain creation: reconcile exact identity and never click Create again blindly;
+- concurrent apps sharing the coordination namespace: serialize by key, then reconcile and reuse one identity.
 
 `ProjectMemoryScope.PROJECT_ONLY` is supported. ChatGPT Work mode is unavailable for project-only-memory projects.
 
@@ -183,10 +184,12 @@ Request/project state and deployment coordination are separate:
 
 <coordination-dir>/<deployment-id>/
 ├── conversations/
-└── locks/
+├── locks/
+├── project-creation-claims/
+└── project-creation-locks/
 ```
 
-Every application/process allowed to mutate the same Chromium profile must use the same absolute `coordination_dir` and `deployment_id`. The same logical request must use the same result state root, so processes recovering it must also use the same `state_dir`. Coordination serializes browser mutation; coordination is not a cross-repository result ledger and is not a substitute for durable request state.
+Every application/process allowed to mutate the same Chromium profile must use the same absolute `coordination_dir` and `deployment_id`. The same logical request must use the same result state root, so processes recovering it must also use the same `state_dir`. Coordination serializes browser mutation and stores only the Project key/name/scope claim needed to prevent duplicate Create actions; exact `ProjectRef` results remain in each caller's `state_dir`, and coordination is not a cross-repository result ledger or a substitute for durable request state.
 
 ## Results and failures
 

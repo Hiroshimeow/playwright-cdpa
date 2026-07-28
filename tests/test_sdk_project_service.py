@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -153,6 +154,106 @@ async def test_ensure_project_creates_once_after_durable_unknown_marker(
 
 
 @pytest.mark.asyncio
+async def test_ensure_project_serializes_create_across_application_state_roots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    shared = {
+        "coordination_dir": tmp_path / "coordination",
+        "deployment_id": "shared-project-profile",
+        "poll": 0.001,
+        "timeout": 1.0,
+    }
+    first = ChatGPTClient(ClientConfig(state_dir=tmp_path / "state-a", **shared))
+    second = ChatGPTClient(ClientConfig(state_dir=tmp_path / "state-b", **shared))
+    expected = project("g-p-0123456789abcdef0123456789abcdea")
+    duplicate = project("g-p-0123456789abcdef0123456789abcdeb")
+    created: ProjectRef | None = None
+    create_calls = 0
+    first_boundary = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def find_project(**_kwargs):
+        return created
+
+    async def create_first(name, memory_scope, on_create_boundary):
+        nonlocal create_calls, created
+        assert name == "Task Project"
+        assert memory_scope is ProjectMemoryScope.DEFAULT
+        on_create_boundary()
+        create_calls += 1
+        first_boundary.set()
+        await release_first.wait()
+        created = expected
+        return expected
+
+    async def create_second(name, memory_scope, on_create_boundary):
+        nonlocal create_calls, created
+        assert name == "Task Project"
+        assert memory_scope is ProjectMemoryScope.DEFAULT
+        on_create_boundary()
+        create_calls += 1
+        created = duplicate
+        return duplicate
+
+    monkeypatch.setattr(first, "_find_project", find_project)
+    monkeypatch.setattr(second, "_find_project", find_project)
+    monkeypatch.setattr(first, "_create_project", create_first)
+    monkeypatch.setattr(second, "_create_project", create_second)
+
+    first_task = asyncio.create_task(first.ensure_project("task-123", "Task Project"))
+    await asyncio.wait_for(first_boundary.wait(), timeout=1)
+    second_task = asyncio.create_task(second.ensure_project("task-123", "Task Project"))
+    await asyncio.sleep(0.05)
+    release_first.set()
+
+    first_result, second_result = await asyncio.gather(first_task, second_task)
+
+    assert create_calls == 1
+    assert first_result == second_result == expected
+    assert first.config.coordination_root == second.config.coordination_root
+    assert first.config.state_dir != second.config.state_dir
+    claim_files = list(first.project_creations.records.glob("*.json"))
+    assert len(claim_files) == 1
+    claim_text = claim_files[0].read_text(encoding="utf-8")
+    assert "project_id" not in claim_text
+    assert "canonical_url" not in claim_text
+    assert expected.project_id not in claim_text
+
+
+@pytest.mark.asyncio
+async def test_project_key_metadata_conflict_is_deployment_scoped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    shared = {
+        "coordination_dir": tmp_path / "coordination",
+        "deployment_id": "shared-project-profile",
+        "poll": 0.001,
+        "timeout": 1.0,
+    }
+    first = ChatGPTClient(ClientConfig(state_dir=tmp_path / "state-a", **shared))
+    second = ChatGPTClient(ClientConfig(state_dir=tmp_path / "state-b", **shared))
+    expected = project("g-p-0123456789abcdef0123456789abcdea")
+
+    async def no_match(**_kwargs):
+        return None
+
+    async def create_project(_name, _memory_scope, on_create_boundary):
+        on_create_boundary()
+        return expected
+
+    async def frontend_must_not_run(**_kwargs):
+        raise AssertionError("metadata conflict must fail before frontend reconciliation")
+
+    monkeypatch.setattr(first, "_find_project", no_match)
+    monkeypatch.setattr(first, "_create_project", create_project)
+    monkeypatch.setattr(second, "_find_project", frontend_must_not_run)
+
+    assert await first.ensure_project("task-123", "Task Project") == expected
+    with pytest.raises(ConflictingIdentityError, match="different metadata"):
+        await second.ensure_project("task-123", "Other Project")
+
+
+@pytest.mark.asyncio
 async def test_pre_click_project_failure_does_not_create_unknown_marker(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -170,6 +271,7 @@ async def test_pre_click_project_failure_does_not_create_unknown_marker(
     with pytest.raises(FrontendNotReadyError, match="actionable"):
         await sdk.ensure_project("task-123", "Task Project")
     assert sdk.projects.load("task-123") is None
+    assert sdk.project_creations.load("task-123") is None
 
 
 @pytest.mark.asyncio
@@ -194,6 +296,10 @@ async def test_post_click_project_failure_persists_unknown_marker(
     assert record is not None
     assert record.creation_unknown is True
     assert record.project is None
+    assert sdk.project_creations.load("task-123") == (
+        "Task Project",
+        ProjectMemoryScope.DEFAULT,
+    )
 
 
 @pytest.mark.asyncio

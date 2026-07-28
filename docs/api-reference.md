@@ -166,7 +166,7 @@ project = await client.ensure_project(
 target = await client.open_project(project)
 ```
 
-`find_project` returns `None`, one exact project, or fails closed on duplicate exact matches. `ensure_project` durably prevents blind duplicate Create after an uncertain frontend outcome.
+`find_project` returns `None`, one exact project, or fails closed on duplicate exact matches. `ensure_project` durably prevents blind duplicate Create after an uncertain frontend outcome and serializes the same stable key across applications sharing one coordination namespace. Exact `ProjectRef` results remain caller-local.
 
 ## `SyncChatGPTClient`
 

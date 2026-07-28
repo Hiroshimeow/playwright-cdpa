@@ -55,7 +55,7 @@ Cross-process locks use `portalocker`. Package import does not depend on POSIX `
 Final DEV evidence:
 
 ```text
-1,406 passed
+1,408 passed
 5 intentional xfails
 0 failed
 Ruff passed
@@ -75,6 +75,12 @@ No additional live Send or Project creation was needed for the two localized REV
 
 The generated path pattern was checked with both Python and JavaScript regular-expression engines. Focused frontend/Project regressions cover valid slugged routes, malformed nested routes, observed Project metadata, and an ineffective Project-only control.
 
+### Post-AUDIT automated correction
+
+AUDIT deterministically reproduced two applications with separate `state_dir` values and one shared coordination namespace crossing Project Create twice. `ensure_project` now acquires a deployment-scoped lock keyed by the stable Project key before frontend reconciliation. The irreversible boundary persists a shared key/name/scope claim plus the caller-local unknown marker; exact `ProjectRef` identity remains only in each caller's `state_dir`.
+
+Automated concurrency evidence uses two clients with different state roots and the same `coordination_dir`/`deployment_id`: one client holds the Create boundary while the second starts. The result is one Create call and one reused Project identity. A conflicting name for the same key fails before frontend access. Pre-click failure leaves no shared claim; post-click uncertainty preserves it and prohibits a second Create. No additional live Project was created for this correction.
+
 ## Automated facts
 
 The suite covers:
@@ -86,7 +92,7 @@ The suite covers:
 - cross-process coordination and crash release;
 - strict target parsing for root, ordinary conversation, project root, and project conversation;
 - current slugged project-route normalization and exact atomic path matching;
-- exact Project create/reconcile/fail-closed matching, including observed post-create memory scope;
+- exact Project create/reconcile/fail-closed matching, including observed post-create memory scope and cross-application Create serialization;
 - immutable attachment snapshots and changed/duplicate/unsupported input rejection;
 - upload preflight versus mutation boundary;
 - partial, duplicate, pending, and manual attachment fail-closed behavior;

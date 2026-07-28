@@ -24,10 +24,10 @@ Baseline before SDK productization:
 0 failed
 ```
 
-Final DEV regression after Project, target, attachment, packaging, upload-boundary, and REVIEW corrections:
+Final DEV regression after Project, target, attachment, packaging, REVIEW, and AUDIT corrections:
 
 ```text
-1,406 passed
+1,408 passed
 5 intentional xfails
 0 failed
 Ruff passed
@@ -111,6 +111,8 @@ A separate client with an empty local project registry then:
 Zero matches remain eligible for one Create. Multiple exact matches fail closed. An uncertain post-Create outcome remains durable and prohibits a blind second Create.
 
 After REVIEW, Project creation was tightened further: once the exact `g-p-*` URL exists, the SDK reads the created Project title and memory scope back from Project Settings using the existing exact-ID lookup. A requested `project_only` scope that was not actually applied now fails closed and is never persisted as a falsely verified `ProjectRef`. This correction is covered by automated frontend regressions; no additional live Project was created for it.
+
+After AUDIT, `ensure_project` also gained a deployment-scoped lock and durable key/name/scope claim under the shared coordination root. Two automated clients with separate state roots but the same coordination namespace now produce exactly one Create and one reused identity. Conflicting metadata for the same stable key fails before frontend access. Exact `ProjectRef` results remain caller-local. This correction was verified without creating another live Project.
 
 ## 6. Fresh project chat and same-request recovery
 
