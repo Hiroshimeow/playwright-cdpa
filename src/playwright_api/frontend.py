@@ -166,45 +166,40 @@ async def find_project_frontend(
             grid = page.locator('[role="grid"][aria-label="Projects"]').first
             await grid.wait_for(state="visible", timeout=10_000)
             readiness_deadline = time.monotonic() + 5.0
-            while time.monotonic() < readiness_deadline:
-                row_count = await page.evaluate(
-                    """() => {
-                      const grid = document.querySelector('[role="grid"][aria-label="Projects"]');
-                      return grid ? grid.querySelectorAll(
+            while True:
+                selection = await page.evaluate(
+                    """expectedName => {
+                      const visible = (element) => Boolean(element && element.getClientRects().length &&
+                        getComputedStyle(element).visibility !== 'hidden');
+                      const grid = [...document.querySelectorAll('[role="grid"][aria-label="Projects"]')]
+                        .find(visible);
+                      if (!grid) return {count: null};
+                      const rows = [...grid.querySelectorAll(
                         '[role="row"][data-page-table-selectable-row="true"]'
-                      ).length : 0;
-                    }"""
+                      )].filter(visible);
+                      const matches = rows.filter((row) => [...row.querySelectorAll('div,span')]
+                        .filter((element) => visible(element) && element.children.length === 0)
+                        .some((element) => String(element.textContent || '').trim() === expectedName));
+                      if (matches.length === 1) matches[0].click();
+                      return {count: matches.length};
+                    }""",
+                    name,
                 )
-                if type(row_count) is not int:
-                    raise FrontendNotReadyError("project directory readiness is malformed")
-                if row_count > 0:
+                if (
+                    not isinstance(selection, dict)
+                    or type(selection.get("count")) is not int
+                ):
+                    raise FrontendNotReadyError(
+                        "project row selection response is malformed"
+                    )
+                count = selection["count"]
+                if count == 1:
                     break
+                if count > 1:
+                    raise ConflictingIdentityError("multiple exact projects matched")
+                if time.monotonic() >= readiness_deadline:
+                    return None
                 await page.wait_for_timeout(250)
-            selection = await page.evaluate(
-                """expectedName => {
-                  const visible = (element) => Boolean(element && element.getClientRects().length &&
-                    getComputedStyle(element).visibility !== 'hidden');
-                  const grid = [...document.querySelectorAll('[role="grid"][aria-label="Projects"]')]
-                    .find(visible);
-                  if (!grid) return {count: null};
-                  const rows = [...grid.querySelectorAll(
-                    '[role="row"][data-page-table-selectable-row="true"]'
-                  )].filter(visible);
-                  const matches = rows.filter((row) => [...row.querySelectorAll('div,span')]
-                    .filter((element) => visible(element) && element.children.length === 0)
-                    .some((element) => String(element.textContent || '').trim() === expectedName));
-                  if (matches.length === 1) matches[0].click();
-                  return {count: matches.length};
-                }""",
-                name,
-            )
-            if not isinstance(selection, dict) or type(selection.get("count")) is not int:
-                raise FrontendNotReadyError("project row selection response is malformed")
-            count = selection["count"]
-            if count == 0:
-                return None
-            if count != 1:
-                raise ConflictingIdentityError("multiple exact projects matched")
             await page.wait_for_url("**/g/g-p-*/project", timeout=60_000)
             try:
                 observed_target = ChatTarget.parse(page.url)

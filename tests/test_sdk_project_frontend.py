@@ -133,12 +133,14 @@ class LookupPage:
         row_count: int = 1,
         project_name: str = "Task Project",
         memory_scope: ProjectMemoryScope = ProjectMemoryScope.DEFAULT,
+        selection_counts: list[int] | None = None,
     ) -> None:
         self.project_id = "g-p-0123456789abcdef0123456789abcdef"
         self.url = "https://chatgpt.com/projects"
         self.row_count = row_count
         self.project_name = project_name
         self.memory_scope = memory_scope
+        self.selection_counts = list(selection_counts or [row_count])
         self.details_open = False
         self.settings_open = False
 
@@ -152,11 +154,12 @@ class LookupPage:
         if name is None:
             return self.row_count
         assert name == "Task Project"
-        if self.row_count == 1:
+        count = self.selection_counts.pop(0) if len(self.selection_counts) > 1 else self.selection_counts[0]
+        if count == 1:
             self.url = (
                 f"https://chatgpt.com/g/{self.project_id}-task-project/project"
             )
-        return {"count": self.row_count}
+        return {"count": count}
 
     async def wait_for_timeout(self, _milliseconds: int) -> None:
         return None
@@ -196,6 +199,19 @@ async def test_find_project_uses_exact_owned_row_and_proves_metadata() -> None:
     assert project.name == "Task Project"
     assert project.memory_scope is ProjectMemoryScope.PROJECT_ONLY
     assert project.canonical_url == f"https://chatgpt.com/g/{page.project_id}/project"
+
+
+@pytest.mark.asyncio
+async def test_find_project_waits_for_delayed_exact_row_hydration() -> None:
+    page = LookupPage(selection_counts=[0, 1])
+
+    project = await find_project_frontend(
+        page,  # type: ignore[arg-type]
+        name="Task Project",
+    )
+
+    assert project is not None
+    assert project.project_id == page.project_id
 
 
 @pytest.mark.asyncio

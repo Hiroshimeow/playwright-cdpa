@@ -27,7 +27,7 @@ Baseline before SDK productization:
 Final DEV regression after Project, target, attachment, packaging, and upload-boundary corrections:
 
 ```text
-1,400 passed
+1,401 passed
 5 intentional xfails
 0 failed
 Ruff passed
@@ -172,16 +172,21 @@ The SDK verified the exact attachment tile identity, waited until the tile was n
 
 Independent TEST found that Project helpers closed their page after `BrowserSession` detached. The detached Playwright wrapper then appeared closed even though the Chromium target remained, leaking one project-root tab per lookup.
 
-The correction closes Project find/create helper pages inside the active browser session, before `playwright.stop()` detaches. Live verification used the existing disposable project and proved:
+The correction closes Project find/create helper pages inside the active browser session, before `playwright.stop()` detaches.
+
+A committed rerun then exposed a second exact-lookup boundary: the Project grid could become visible before the requested row finished hydrating. One transient zero match incorrectly triggered a disposable duplicate Create. Exact-name lookup now polls the exact row count for the existing bounded five-second readiness window; one match is selected, multiple matches fail closed, and only a stable zero result can permit Create. The disposable duplicate was removed through its exact Project Settings delete confirmation.
+
+Final live verification used the original disposable project and proved:
 
 ```text
-initial page targets = 17
+initial page targets = 14
 find_project calls = 3
 registry-loss ensure_project reconciliation = true
 registry reuse = true
 added targets = []
 removed targets = []
-final page targets = 17
+final page targets = 14
+project-root pages after completion = 0
 ```
 
 The previously leaked disposable project-root tabs were closed explicitly. Project-conversation pages, unrelated tabs, and borrowed pages were preserved. Final coordination state had no active owners, and Chromium remained online.
