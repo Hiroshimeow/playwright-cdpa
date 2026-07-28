@@ -316,8 +316,24 @@ async def create_project_frontend(
         )
         await name_input.fill(name)
         if memory_scope is ProjectMemoryScope.PROJECT_ONLY:
-            option = page.get_by_text("Project-only memory", exact=False).first
-            await option.click(timeout=5_000)
+            trigger = await _find_visible(
+                page,
+                ('[data-testid="project-memory-scope-trigger"]',),
+                "project memory scope trigger",
+                5_000,
+            )
+            await trigger.evaluate("element => element.click()")
+            option = await _find_visible(
+                page,
+                (
+                    '[data-testid="project-memory-scope-project-only"]',
+                    'button[role="menuitemradio"]:'
+                    'has([role="heading"]:text-is("Project-only memory"))',
+                ),
+                "project-only memory scope option",
+                5_000,
+            )
+            await option.evaluate("element => element.click()")
         submit = await _find_visible(
             page,
             (

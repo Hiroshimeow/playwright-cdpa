@@ -28,22 +28,24 @@ class FakeLocator:
         assert script == "element => element.click()"
         if self.kind == "open":
             self.page.modal_open = True
+        elif self.kind == "memory-trigger":
+            self.page.memory_trigger_clicks += 1
+            self.page.memory_menu_open = True
+            self.page.events.append("trigger")
+        elif self.kind == "memory-option":
+            assert self.page.memory_menu_open is True
+            self.page.memory_option_clicks += 1
+            self.page.memory_scope = ProjectMemoryScope.PROJECT_ONLY
+            self.page.events.append("option")
         elif self.kind == "submit":
             assert self.page.boundary_entered is True
+            self.page.submit_clicks += 1
             self.page.submitted = True
+            self.page.events.append("submit")
 
     async def fill(self, value: str) -> None:
         assert self.kind == "name"
         self.page.name = value
-
-
-class NoOpMemoryOption:
-    @property
-    def first(self) -> "NoOpMemoryOption":
-        return self
-
-    async def click(self, *, timeout: int) -> None:
-        assert timeout == 5_000
 
 
 class FakePage:
@@ -53,22 +55,39 @@ class FakePage:
         self.boundary_entered = False
         self.submitted = False
         self.name = ""
+        self.memory_menu_open = False
+        self.memory_scope = ProjectMemoryScope.DEFAULT
+        self.memory_trigger_clicks = 0
+        self.memory_option_clicks = 0
+        self.submit_clicks = 0
+        self.events: list[str] = []
 
     async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
         assert url == "https://chatgpt.com/projects"
         assert wait_until == "domcontentloaded"
         assert timeout == 60_000
 
-    def get_by_text(self, text: str, *, exact: bool) -> NoOpMemoryOption:
-        assert text == "Project-only memory"
-        assert exact is False
-        return NoOpMemoryOption()
+    def get_by_text(self, text: str, *, exact: bool):
+        raise AssertionError(f"unexpected fuzzy text lookup: {text!r}, exact={exact!r}")
 
     def locator(self, selector: str) -> FakeLocator:
         if selector == 'button[aria-label="New project"]':
             return FakeLocator(visible=True, page=self, kind="open")
         if selector == 'form[data-testid="create-new-project-form"] input[name="projectName"]':
             return FakeLocator(visible=self.modal_open, page=self, kind="name")
+        if selector == '[data-testid="project-memory-scope-trigger"]':
+            return FakeLocator(visible=self.modal_open, page=self, kind="memory-trigger")
+        if selector == '[data-testid="project-memory-scope-project-only"]':
+            return FakeLocator(visible=False, page=self)
+        if selector == (
+            'button[role="menuitemradio"]:'
+            'has([role="heading"]:text-is("Project-only memory"))'
+        ):
+            return FakeLocator(
+                visible=self.modal_open and self.memory_menu_open,
+                page=self,
+                kind="memory-option",
+            )
         if selector == 'form[data-testid="create-new-project-form"] button[type="submit"]':
             return FakeLocator(visible=self.modal_open, page=self, kind="submit")
         return FakeLocator(visible=False, page=self)
@@ -115,6 +134,56 @@ async def test_create_project_uses_current_stable_form_contract_and_marks_bounda
     assert project == expected
     assert page.boundary_entered is True
     assert page.submitted is True
+    assert page.memory_trigger_clicks == 0
+    assert page.memory_option_clicks == 0
+    assert page.submit_clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_create_project_opens_exact_memory_scope_selector_before_project_only(
+    monkeypatch,
+) -> None:
+    import playwright_api.frontend as frontend_module
+
+    page = FakePage()
+    exact_option = (
+        'button[role="menuitemradio"]:'
+        'has([role="heading"]:text-is("Project-only memory"))'
+    )
+    assert page.locator('[data-testid="project-memory-scope-project-only"]').visible is False
+    assert page.locator(exact_option).visible is False
+    expected = ProjectRef(
+        project_id="g-p-project123",
+        canonical_url="https://chatgpt.com/g/g-p-project123/project",
+        name="Task Project",
+        memory_scope=ProjectMemoryScope.PROJECT_ONLY,
+    )
+
+    async def observed(_page, *, project_id, name):
+        assert project_id == expected.project_id
+        assert name == expected.name
+        return expected
+
+    monkeypatch.setattr(frontend_module, "find_project_frontend", observed)
+
+    def on_boundary() -> None:
+        assert page.name == "Task Project"
+        assert page.memory_scope is ProjectMemoryScope.PROJECT_ONLY
+        page.boundary_entered = True
+        page.events.append("boundary")
+
+    project = await create_project_frontend(
+        page,  # type: ignore[arg-type]
+        name="Task Project",
+        memory_scope=ProjectMemoryScope.PROJECT_ONLY,
+        on_create_boundary=on_boundary,
+    )
+
+    assert project == expected
+    assert page.memory_trigger_clicks == 1
+    assert page.memory_option_clicks == 1
+    assert page.submit_clicks == 1
+    assert page.events == ["trigger", "option", "boundary", "submit"]
 
 
 @pytest.mark.asyncio
