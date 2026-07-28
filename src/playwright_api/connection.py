@@ -17,7 +17,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from .config import CoreConfig
+from .config import ClientConfig
 from .errors import (
     BrowserOfflineError,
     ConflictingIdentityError,
@@ -30,7 +30,7 @@ from .targets import conversation_url, normalize_conversation
 
 
 class BrowserSession:
-    def __init__(self, config: CoreConfig) -> None:
+    def __init__(self, config: ClientConfig) -> None:
         self.config = config.validated()
         self.playwright: Playwright | None = None
         self.browser: Browser | None = None

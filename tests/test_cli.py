@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from playwright_gpt_core.cli import (
+from playwright_api.cli import (
     EXIT_AMBIGUOUS,
     EXIT_CANCELLED,
     EXIT_OWNERSHIP,
@@ -14,9 +14,9 @@ from playwright_gpt_core.cli import (
     exit_code,
     main,
 )
-from playwright_gpt_core.errors import Failure, FailureCategory
-from playwright_gpt_core.models import Result, TurnIdentity, TurnRecord, TurnState
-from playwright_gpt_core.storage import StateStore
+from playwright_api.errors import Failure, FailureCategory
+from playwright_api.models import Result, TurnIdentity, TurnRecord, TurnState
+from playwright_api.storage import StateStore
 
 
 def test_cli_acceptance_surface_requires_explicit_target() -> None:
@@ -75,7 +75,7 @@ def test_stable_exit_codes() -> None:
 
 
 def test_get_json_waits_for_exact_result(monkeypatch, capsys) -> None:
-    import playwright_gpt_core.cli as cli_module
+    import playwright_api.cli as cli_module
 
     class Core:
         def __init__(self, _config) -> None:
@@ -84,7 +84,7 @@ def test_get_json_waits_for_exact_result(monkeypatch, capsys) -> None:
         async def get(self, request_id: str) -> Result:
             return Result(1, request_id, TurnState.COMPLETE, response="EXACT_OK")
 
-    monkeypatch.setattr(cli_module, "ChatGPTCore", Core)
+    monkeypatch.setattr(cli_module, "ChatGPTClient", Core)
 
     code = main(["get", "req-1", "--json"])
     output = capsys.readouterr().out.strip()
@@ -199,7 +199,7 @@ def test_unexpected_exception_diagnostic_does_not_echo_credentials() -> None:
 def test_unexpected_exception_json_and_stderr_do_not_echo_credentials(
     monkeypatch, capsys
 ) -> None:
-    import playwright_gpt_core.cli as cli_module
+    import playwright_api.cli as cli_module
 
     async def fail(_args):
         raise RuntimeError("Authorization: Basic do-not-print")
@@ -260,7 +260,7 @@ def test_get_rejects_string_failure_flags_as_corrupt_state(tmp_path, capsys) -> 
 
 
 def test_unexpected_exception_url_and_proof_values_are_not_printed(monkeypatch, capsys) -> None:
-    import playwright_gpt_core.cli as cli_module
+    import playwright_api.cli as cli_module
 
     async def fail(_args):
         raise RuntimeError(
@@ -301,7 +301,7 @@ def test_get_rejects_turn_file_payload_identity_mismatch(tmp_path, capsys) -> No
 def test_unexpected_exception_generic_secret_assignments_are_not_printed(
     monkeypatch, capsys
 ) -> None:
-    import playwright_gpt_core.cli as cli_module
+    import playwright_api.cli as cli_module
 
     async def fail(_args):
         raise RuntimeError(

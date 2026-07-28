@@ -12,7 +12,7 @@ Current CDPA V2 owns:
 - dashboard commands, projections, controls, and operator continuation;
 - durable task/hop records, `DurableSendBlock`, and request-ledger lifecycle.
 
-`playwright-gpt-core` should own only reusable browser execution beneath that control plane:
+`playwright-api` should own only reusable browser execution beneath that control plane:
 
 - deployment-wide conversation mutation ownership;
 - exact page/conversation resolution;

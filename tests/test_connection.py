@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.connection import close_page_by_target_id, page_target_id
+from playwright_api.connection import close_page_by_target_id, page_target_id
 
 
 class FakePage:

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.errors import OwnershipConflictError
-from playwright_gpt_core.storage import StateStore
+from playwright_api.errors import OwnershipConflictError
+from playwright_api.storage import StateStore
 
 
 def test_durable_conversation_claim_blocks_second_sender(tmp_path) -> None:

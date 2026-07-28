@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -12,23 +12,35 @@ from .errors import InvalidInputError
 _DEPLOYMENT_ID = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 
 
-def _default_coordination_dir() -> Path:
+def _state_base() -> Path:
+    if os.name == "nt":
+        configured = os.environ.get("LOCALAPPDATA")
+        if configured:
+            candidate = Path(configured).expanduser()
+            if candidate.is_absolute():
+                return candidate
+        home = Path.home()
+        if not home.is_absolute():
+            raise InvalidInputError("home directory must be absolute")
+        return home / "AppData" / "Local"
+
     configured = os.environ.get("XDG_STATE_HOME")
     if configured:
         candidate = Path(configured).expanduser()
         if candidate.is_absolute():
-            base = candidate
-        else:
-            home = Path.home()
-            if not home.is_absolute():
-                raise InvalidInputError("home directory must be absolute")
-            base = home / ".local" / "state"
-    else:
-        home = Path.home()
-        if not home.is_absolute():
-            raise InvalidInputError("home directory must be absolute")
-        base = home / ".local" / "state"
-    return (base / "playwright-gpt-core" / "coordination").resolve()
+            return candidate
+    home = Path.home()
+    if not home.is_absolute():
+        raise InvalidInputError("home directory must be absolute")
+    return home / ".local" / "state"
+
+
+def _default_state_dir() -> Path:
+    return (_state_base() / "playwright-api" / "requests").resolve()
+
+
+def _default_coordination_dir() -> Path:
+    return (_state_base() / "playwright-api" / "coordination").resolve()
 
 
 def _absolute_coordination_dir(value: Path | None) -> Path:
@@ -41,9 +53,9 @@ def _absolute_coordination_dir(value: Path | None) -> Path:
 
 
 @dataclass(frozen=True, slots=True)
-class CoreConfig:
+class ClientConfig:
     cdp_endpoint: str = "http://127.0.0.1:9222"
-    state_dir: Path = Path(".playwright-gpt")
+    state_dir: Path = field(default_factory=_default_state_dir)
     coordination_dir: Path | None = None
     deployment_id: str | None = None
     timeout: float = 1800.0
@@ -68,13 +80,11 @@ class CoreConfig:
         base = _absolute_coordination_dir(self.coordination_dir)
         deployment = self.deployment_id
         if deployment is None:
-            digest = hashlib.sha256(self.normalized_cdp_endpoint.encode("utf-8")).hexdigest()[
-                :24
-            ]
+            digest = hashlib.sha256(self.normalized_cdp_endpoint.encode("utf-8")).hexdigest()[:24]
             deployment = f"cdp-{digest}"
         return base / deployment
 
-    def validated(self) -> CoreConfig:
+    def validated(self) -> ClientConfig:
         parsed = urlparse(self.cdp_endpoint)
         if parsed.scheme not in {"http", "https"}:
             raise InvalidInputError("CDP endpoint must use http or https")
@@ -97,5 +107,6 @@ class CoreConfig:
             raise InvalidInputError("graph convergence requires at least two samples")
         return replace(
             self,
+            state_dir=Path(self.state_dir).expanduser().resolve(),
             coordination_dir=_absolute_coordination_dir(self.coordination_dir),
         )

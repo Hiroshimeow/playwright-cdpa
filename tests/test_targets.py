@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.errors import InvalidInputError
-from playwright_gpt_core.targets import normalize_conversation
+from playwright_api.errors import InvalidInputError
+from playwright_api.targets import normalize_conversation
 
 
 @pytest.mark.parametrize(

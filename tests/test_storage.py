@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from playwright_gpt_core.errors import CorruptStateError, Failure, FailureCategory
-from playwright_gpt_core.models import Result, TurnIdentity, TurnRecord, TurnState
-from playwright_gpt_core.storage import StateStore
+from playwright_api.errors import CorruptStateError, Failure, FailureCategory
+from playwright_api.models import Result, TurnIdentity, TurnRecord, TurnState
+from playwright_api.storage import StateStore
 
 
 def test_atomic_round_trip_and_revision(tmp_path) -> None:
@@ -84,7 +84,7 @@ def test_state_file_contains_no_prompt_or_secret(tmp_path) -> None:
 
 
 def test_create_rejects_duplicate_request_identity(tmp_path) -> None:
-    from playwright_gpt_core.errors import OwnershipConflictError
+    from playwright_api.errors import OwnershipConflictError
 
     store = StateStore(tmp_path)
     store.create(TurnRecord.new(request_id="same-request", prompt="first"))
@@ -329,7 +329,7 @@ def test_turn_file_identity_must_match_embedded_request_id(tmp_path) -> None:
 
 
 def test_find_by_conversation_rejects_mismatched_turn_file_identity(tmp_path) -> None:
-    from playwright_gpt_core.models import TurnIdentity
+    from playwright_api.models import TurnIdentity
 
     store = StateStore(tmp_path)
     value = (

@@ -4,22 +4,22 @@ from pathlib import Path
 
 import pytest
 
-from playwright_gpt_core.config import CoreConfig
-from playwright_gpt_core.errors import InvalidInputError
+from playwright_api.config import ClientConfig
+from playwright_api.errors import InvalidInputError
 
 
 def test_cdp_endpoint_must_be_loopback() -> None:
     with pytest.raises(InvalidInputError):
-        CoreConfig(cdp_endpoint="http://example.com:9222").validated()
-    assert CoreConfig(cdp_endpoint="http://127.0.0.1:9222").validated()
+        ClientConfig(cdp_endpoint="http://example.com:9222").validated()
+    assert ClientConfig(cdp_endpoint="http://127.0.0.1:9222").validated()
 
 
 def test_default_deployment_namespace_normalizes_loopback_aliases(tmp_path) -> None:
-    first = CoreConfig(
+    first = ClientConfig(
         cdp_endpoint="http://127.0.0.1:9222/",
         coordination_dir=tmp_path,
     ).validated()
-    second = CoreConfig(
+    second = ClientConfig(
         cdp_endpoint="http://localhost:9222",
         coordination_dir=tmp_path,
     ).validated()
@@ -29,14 +29,14 @@ def test_default_deployment_namespace_normalizes_loopback_aliases(tmp_path) -> N
 
 
 def test_explicit_deployment_id_is_bounded_and_path_safe(tmp_path) -> None:
-    config = CoreConfig(
+    config = ClientConfig(
         coordination_dir=tmp_path,
         deployment_id="profile-9222",
     ).validated()
     assert config.coordination_root == tmp_path / "profile-9222"
 
     with pytest.raises(InvalidInputError):
-        CoreConfig(coordination_dir=tmp_path, deployment_id="../escape").validated()
+        ClientConfig(coordination_dir=tmp_path, deployment_id="../escape").validated()
 
 
 def test_relative_xdg_state_home_uses_cwd_independent_absolute_default(
@@ -52,11 +52,11 @@ def test_relative_xdg_state_home_uses_cwd_independent_absolute_default(
     monkeypatch.setenv("XDG_STATE_HOME", "relative-xdg-state")
 
     monkeypatch.chdir(repo_a)
-    first = CoreConfig().validated()
+    first = ClientConfig().validated()
     first_root = first.coordination_root
 
     monkeypatch.chdir(repo_b)
-    second = CoreConfig().validated()
+    second = ClientConfig().validated()
 
     assert first_root.is_absolute()
     assert second.coordination_root == first_root
@@ -77,7 +77,7 @@ def test_relative_home_and_xdg_are_rejected_from_different_cwds(tmp_path, monkey
     for repository in (repo_a, repo_b):
         monkeypatch.chdir(repository)
         with pytest.raises(InvalidInputError, match="home directory must be absolute"):
-            CoreConfig().validated()
+            ClientConfig().validated()
         assert not (repository / "relative-home").exists()
         assert not (repository / "relative-xdg-state").exists()
 
@@ -88,7 +88,7 @@ def test_relative_home_is_rejected_when_xdg_state_home_is_unset(tmp_path, monkey
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
 
     with pytest.raises(InvalidInputError, match="home directory must be absolute"):
-        CoreConfig().validated()
+        ClientConfig().validated()
 
     assert not (tmp_path / "relative-home").exists()
 
@@ -98,23 +98,23 @@ def test_absolute_xdg_state_home_does_not_require_absolute_home(tmp_path, monkey
     monkeypatch.setenv("HOME", "relative-home")
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    config = CoreConfig().validated()
+    config = ClientConfig().validated()
 
-    assert config.coordination_root.parent.parent == state_home / "playwright-gpt-core"
+    assert config.coordination_root.parent.parent == state_home / "playwright-api"
 
 
 def test_unset_home_uses_absolute_os_account_home(monkeypatch) -> None:
     monkeypatch.delenv("HOME", raising=False)
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
 
-    config = CoreConfig().validated()
+    config = ClientConfig().validated()
 
     assert config.coordination_root.is_absolute()
 
 
 def test_relative_explicit_coordination_directory_is_rejected() -> None:
     with pytest.raises(InvalidInputError, match="absolute path"):
-        CoreConfig(coordination_dir=Path("shared-coordination")).validated()
+        ClientConfig(coordination_dir=Path("shared-coordination")).validated()
 
 
 def test_same_relative_coordination_argument_is_rejected_from_different_cwds(
@@ -128,7 +128,7 @@ def test_same_relative_coordination_argument_is_rejected_from_different_cwds(
     for repository in (repo_a, repo_b):
         monkeypatch.chdir(repository)
         with pytest.raises(InvalidInputError, match="absolute path"):
-            CoreConfig(
+            ClientConfig(
                 coordination_dir=Path("shared-coordination"),
                 deployment_id="same-browser",
             ).validated()

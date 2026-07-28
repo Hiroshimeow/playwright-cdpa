@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from playwright_gpt_core.errors import SchemaDriftError
-from playwright_gpt_core.transport import (
+from playwright_api.errors import SchemaDriftError
+from playwright_api.transport import (
     FrontendAcceptance,
     is_real_conversation_response,
     parse_sse_events,

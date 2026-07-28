@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.errors import AmbiguousIdentityError, ConflictingIdentityError
-from playwright_gpt_core.identity import discover_user_identity, merge_identity
-from playwright_gpt_core.models import TurnIdentity
+from playwright_api.errors import AmbiguousIdentityError, ConflictingIdentityError
+from playwright_api.identity import discover_user_identity, merge_identity
+from playwright_api.models import TurnIdentity
 from tests.fixtures.graph_factory import graph, message
 
 

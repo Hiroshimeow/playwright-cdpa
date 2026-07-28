@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.errors import GraphConvergenceTimeout
-from playwright_gpt_core.models import TurnIdentity
-from playwright_gpt_core.monitor import monitor_snapshots
+from playwright_api.errors import GraphConvergenceTimeout
+from playwright_api.models import TurnIdentity
+from playwright_api.monitor import monitor_snapshots
 from tests.fixtures.graph_factory import graph, message
 
 IDENTITY = TurnIdentity(
@@ -56,7 +56,7 @@ async def test_complete_without_convergence_fails() -> None:
 
 @pytest.mark.asyncio
 async def test_terminal_backend_failure_is_distinct_from_convergence() -> None:
-    from playwright_gpt_core.errors import BackendError
+    from playwright_api.errors import BackendError
 
     with pytest.raises(BackendError):
         await monitor_snapshots(

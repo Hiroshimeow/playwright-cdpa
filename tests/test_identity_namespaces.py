@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from playwright_gpt_core.errors import ConflictingIdentityError
-from playwright_gpt_core.identity import discover_user_identity
-from playwright_gpt_core.models import TurnIdentity, TurnRecord
+from playwright_api.errors import ConflictingIdentityError
+from playwright_api.identity import discover_user_identity
+from playwright_api.models import TurnIdentity, TurnRecord
 from tests.fixtures.graph_factory import graph, message
 
 

@@ -5,8 +5,8 @@ import time
 
 import pytest
 
-from playwright_gpt_core.errors import OwnershipConflictError
-from playwright_gpt_core.locking import ConversationLock
+from playwright_api.errors import OwnershipConflictError
+from playwright_api.locking import ConversationLock
 
 
 def _hold_lock(root: str, ready: mp.Queue[bool]) -> None:

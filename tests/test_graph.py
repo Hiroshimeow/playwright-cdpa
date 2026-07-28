@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.errors import (
+from playwright_api.errors import (
     ConflictingIdentityError,
     IdentityMissingError,
     SchemaDriftError,
 )
-from playwright_gpt_core.graph import GraphResolver, fingerprint_node
-from playwright_gpt_core.models import TurnIdentity
+from playwright_api.graph import GraphResolver, fingerprint_node
+from playwright_api.models import TurnIdentity
 from tests.fixtures.graph_factory import graph, message
 
 

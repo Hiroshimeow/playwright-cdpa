@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from playwright_gpt_core.redaction import redact, safe_json_dumps, sanitize_diagnostic
+from playwright_api.redaction import redact, safe_json_dumps, sanitize_diagnostic
 
 
 def test_recursive_secret_redaction() -> None:
@@ -161,7 +161,7 @@ def test_ordinary_near_match_path_segments_remain_diagnostic_context(segment: st
 
 
 def test_failure_object_sanitizes_generic_assignments_and_compound_path() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     failure = Failure(
         FailureCategory.INVARIANT,
@@ -267,7 +267,7 @@ def test_common_credential_and_key_near_match_paths_remain_visible(segment: str)
 
 
 def test_failure_dict_sanitizes_common_credentials_and_private_keys() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     failure = Failure(
         FailureCategory.INVARIANT,
@@ -380,7 +380,7 @@ def test_cloud_and_encryption_documentation_paths_remain_visible(segment: str) -
 
 
 def test_cloud_and_encryption_query_failure_and_nested_diagnostics_are_sanitized() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     query_diagnostic = (
         "GET https://example.test/callback?"
@@ -422,7 +422,7 @@ def test_multiword_passphrases_redact_to_safe_boundary(
 
 
 def test_multiword_passphrase_is_removed_from_nested_diagnostic_and_failure() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostic = "qualifiedPassphrase=correct horse battery staple; retry later"
     nested = safe_json_dumps({"failure": {"message": diagnostic}})
@@ -509,7 +509,7 @@ def test_single_raw_key_value_without_cookie_provenance_remains_diagnostic_conte
 
 
 def test_quoted_keys_and_set_cookie_are_removed_from_nested_diagnostic_and_failure() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostics = [
         '{"passphrase": "NESTED QUOTED SECRET", "mode": "inspect"}',
@@ -569,7 +569,7 @@ def test_explicit_cookie_headers_accept_http_token_punctuation(punctuation: str)
 
 
 def test_escaped_quotes_and_token_cookie_names_are_removed_from_nested_failure() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostics = [
         json.dumps(
@@ -759,7 +759,7 @@ def test_quoted_separator_bearing_secret_keys_are_sanitized(
 
 
 def test_new_authorization_and_proof_shapes_are_removed_from_nested_failure() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostics = [
         "Authorization: Digest nonce=NESTED-AUTH-NONCE, response=NESTED-AUTH-RESPONSE",
@@ -872,7 +872,7 @@ def test_quoted_proxy_authorization_assignments_redact_every_scheme(
 
 
 def test_proxy_authorization_values_are_removed_from_nested_and_failure_surfaces() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostics = [
         json.dumps(
@@ -941,7 +941,7 @@ def test_explicit_authorization_headers_redact_every_same_line_suffix_parameter(
 def test_authorization_suffix_parameters_are_removed_from_nested_and_failure_surfaces(
     suffix_word: str,
 ) -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     canary = f"NESTED-AUTH-{suffix_word.upper()}-TAIL"
     diagnostic = (
@@ -1143,7 +1143,7 @@ def test_authorization_and_cookie_near_match_keys_remain_visible(label: str) -> 
 
 
 def test_cookie_and_qualified_authorization_values_are_removed_from_nested_failure() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostics = [
         '{"Set-Cookie":"session=NESTED-SET-COOKIE; HttpOnly","mode":"inspect"}',
@@ -1247,7 +1247,7 @@ def test_lowercase_compact_multi_level_header_keys_redact_quoted_assignments(
 
 
 def test_lowercase_compact_multi_level_header_values_are_removed_from_nested_failure() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostics = (
         json.dumps(
@@ -1356,7 +1356,7 @@ def test_folded_authorization_continuations_are_part_of_the_secret_value(
 
 
 def test_folded_authorization_continuations_are_removed_from_nested_failure() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostic = (
         "Authorization: Digest nonce=FOLDED-NESTED-PRIMARY\r\n"
@@ -1596,7 +1596,7 @@ _MISSING_CLOSE_CANONICAL_SECRET_KEYS = [
 def test_missing_close_canonical_escaped_secret_keys_fail_closed(
     diagnostic: str, canary: str
 ) -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     outputs = (
         sanitize_diagnostic(diagnostic),
@@ -1675,7 +1675,7 @@ def test_missing_close_internal_delimiters_do_not_hide_canonical_secret_componen
 def test_missing_close_internal_delimiter_secrets_are_removed_from_nested_failure(
     diagnostic: str, canary: str
 ) -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     outputs = (
         safe_json_dumps({"failure": {"message": diagnostic}}),
@@ -1721,7 +1721,7 @@ _ESCAPED_DIAGNOSTIC_VALUE_CASES = [
 def test_valid_json_escaped_diagnostic_values_are_canonically_sanitized(
     diagnostic: str, canary: str
 ) -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     direct = sanitize_diagnostic(diagnostic)
     nested = safe_json_dumps({"failure": {"message": diagnostic}})
@@ -1844,7 +1844,7 @@ _RECURSIVE_STRUCTURED_VALUE_CASES = [
 def test_nested_and_double_escaped_structured_values_are_sanitized_recursively(
     diagnostic: str, canary: str
 ) -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     direct = sanitize_diagnostic(diagnostic)
     nested = safe_json_dumps({"failure": {"message": diagnostic}})
@@ -1948,7 +1948,7 @@ def test_recursive_structured_depth_budget_fails_closed_without_leaking() -> Non
 
 
 def test_json_array_secret_values_remain_safe_across_nested_failure_boundaries() -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostic = r'["Authorization\u003a Custom ARRAY-PUBLIC-AUTH","safe-public"]'
     outputs = (
@@ -1997,7 +1997,7 @@ _JSON_STRING_ROOT_SECRET_CASES = [
 def test_json_string_roots_are_recursively_sanitized_and_remain_valid_json(
     diagnostic: str, canary: str
 ) -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     direct = sanitize_diagnostic(diagnostic)
     nested = safe_json_dumps({"failure": {"message": diagnostic}})
@@ -2072,7 +2072,7 @@ _JSON_OBJECT_ESCAPED_KEY_CASES = [
 def test_json_object_keys_are_canonicalized_across_bounded_escape_layers(
     diagnostic: str, canary: str, layers: int
 ) -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     direct = sanitize_diagnostic(diagnostic)
     nested = safe_json_dumps({"failure": {"message": diagnostic}})
@@ -2350,7 +2350,7 @@ _SECRET_BEARING_JSON_KEY_CASES = [
 
 @pytest.mark.parametrize(("key", "canary"), _SECRET_BEARING_JSON_KEY_CASES)
 def test_secret_bearing_json_object_key_token_fails_closed(key: str, canary: str) -> None:
-    from playwright_gpt_core.errors import Failure, FailureCategory
+    from playwright_api.errors import Failure, FailureCategory
 
     diagnostic = json.dumps({key: "ordinary", "mode": "inspect"}, separators=(",", ":"))
     direct = sanitize_diagnostic(diagnostic)

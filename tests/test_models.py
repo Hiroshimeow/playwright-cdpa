@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.models import SendProvenance, TurnIdentity, TurnRecord, TurnState
+from playwright_api.models import SendProvenance, TurnIdentity, TurnRecord, TurnState
 
 
 def test_uncertain_send_is_never_retryable() -> None:
@@ -15,7 +15,7 @@ def test_uncertain_send_is_never_retryable() -> None:
 
 
 def test_click_boundary_can_be_durably_round_tripped(tmp_path) -> None:
-    from playwright_gpt_core.storage import StateStore
+    from playwright_api.storage import StateStore
 
     store = StateStore(tmp_path)
     record = TurnRecord.new(request_id="req-1", prompt="hello").transition(TurnState.PREPARING)
@@ -40,7 +40,7 @@ def test_prompt_body_is_not_serialized() -> None:
 
 
 def test_helper_target_ownership_round_trips_in_schema_four(tmp_path) -> None:
-    from playwright_gpt_core.storage import StateStore
+    from playwright_api.storage import StateStore
 
     store = StateStore(tmp_path)
     record = TurnRecord.new(request_id="helper", prompt="hello").with_helper_page(

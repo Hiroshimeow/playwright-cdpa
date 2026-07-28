@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.config import CoreConfig
-from playwright_gpt_core.errors import AmbiguousOutcomeError
-from playwright_gpt_core.graph import graph_fingerprints
-from playwright_gpt_core.models import SendProvenance, TurnIdentity, TurnRecord, TurnState
-from playwright_gpt_core.service import ChatGPTCore
+from playwright_api.config import ClientConfig
+from playwright_api.errors import AmbiguousOutcomeError
+from playwright_api.graph import graph_fingerprints
+from playwright_api.models import SendProvenance, TurnIdentity, TurnRecord, TurnState
+from playwright_api.service import ChatGPTClient
 from tests.fixtures.graph_factory import graph, message
 
 
@@ -15,7 +15,7 @@ class Backend:
         self.snapshot_graph = snapshot_graph
 
     async def snapshot(self, conversation_id: str):
-        from playwright_gpt_core.monitor import MonitorSnapshot
+        from playwright_api.monitor import MonitorSnapshot
 
         return MonitorSnapshot("COMPLETE", self.snapshot_graph)
 
@@ -24,8 +24,8 @@ class Backend:
 async def test_uncertain_existing_send_reconciles_one_graph_delta_without_resend(
     tmp_path,
 ) -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="uncertain-test",
@@ -86,8 +86,8 @@ async def test_uncertain_existing_send_reconciles_one_graph_delta_without_resend
 
 @pytest.mark.asyncio
 async def test_uncertain_send_without_graph_anchor_cannot_reconcile(tmp_path) -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="uncertain-test",
@@ -162,7 +162,7 @@ class _BrowserSession:
 async def test_uncertain_recovery_rejects_changed_or_missing_baseline_without_binding(
     tmp_path, monkeypatch, drift: str
 ) -> None:
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     baseline = graph(
         message("root", "system", None, turn=None, request=None),
@@ -220,8 +220,8 @@ async def test_uncertain_recovery_rejects_changed_or_missing_baseline_without_bi
     monkeypatch.setattr(service_module, "BrowserSession", _BrowserSession)
     monkeypatch.setattr(service_module, "AuthenticatedBackend", ReconcileBackend)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="uncertain-baseline-test",
@@ -263,8 +263,8 @@ async def test_uncertain_recovery_rejects_changed_or_missing_baseline_without_bi
 
 @pytest.mark.asyncio
 async def test_uncertain_recovery_rejects_baseline_without_anchor_fingerprint(tmp_path) -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="uncertain-anchor-test",
@@ -305,12 +305,12 @@ class _PublicSnapshotBackend:
         pass
 
     async def snapshot(self, _conversation_id: str):
-        from playwright_gpt_core.monitor import MonitorSnapshot
+        from playwright_api.monitor import MonitorSnapshot
 
         return MonitorSnapshot("COMPLETE", type(self).snapshot_graph)
 
 
-def _uncertain_public_record(core: ChatGPTCore, baseline: dict) -> TurnRecord:
+def _uncertain_public_record(core: ChatGPTClient, baseline: dict) -> TurnRecord:
     record = TurnRecord.new(
         request_id="public-uncertain-request",
         prompt="not persisted",
@@ -404,15 +404,15 @@ def _ambiguous_post_baseline_graph(kind: str) -> dict:
 async def test_public_uncertain_recovery_rejects_multiple_post_baseline_users(
     tmp_path, monkeypatch, kind: str
 ) -> None:
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     snapshot = _ambiguous_post_baseline_graph(kind)
     _PublicSnapshotBackend.snapshot_graph = snapshot
     monkeypatch.setattr(service_module, "BrowserSession", _BrowserSession)
     monkeypatch.setattr(service_module, "AuthenticatedBackend", _PublicSnapshotBackend)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="uncertain-multiple-test",
@@ -446,7 +446,7 @@ async def test_public_uncertain_recovery_rejects_multiple_post_baseline_users(
 async def test_public_uncertain_recovery_accepts_one_unique_post_baseline_user(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     snapshot = graph(
         message("root", "system", None, turn=None, request=None),
@@ -480,8 +480,8 @@ async def test_public_uncertain_recovery_accepts_one_unique_post_baseline_user(
     monkeypatch.setattr(service_module, "BrowserSession", _BrowserSession)
     monkeypatch.setattr(service_module, "AuthenticatedBackend", _PublicSnapshotBackend)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="uncertain-unique-test",

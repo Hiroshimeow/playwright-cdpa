@@ -1,6 +1,6 @@
-# playwright-gpt-core
+# playwright-api
 
-`playwright-gpt-core` is a fail-closed Python execution core for ChatGPT Web in an existing persistent Chromium exposed through loopback CDP.
+`playwright-api` is a fail-closed Python execution core for ChatGPT Web in an existing persistent Chromium exposed through loopback CDP.
 
 It uses the real ChatGPT composer and real Send/Stop controls, observes the unmodified frontend request/response, persists an irreversible Send boundary, resolves the exact conversation graph turn, and returns success only when the final assistant response is proven to belong to that request.
 
@@ -32,7 +32,7 @@ Python 3.10 or newer is required. Cross-process locking currently requires POSIX
 Fresh conversation:
 
 ```bash
-uv run playwright-gpt send "Reply with exactly OK" \
+uv run playwright-api send "Reply with exactly OK" \
   --fresh \
   --request-id personal-001
 ```
@@ -40,7 +40,7 @@ uv run playwright-gpt send "Reply with exactly OK" \
 Continue an exact conversation. Waiting for a foreign core owner is the default:
 
 ```bash
-uv run playwright-gpt send "Continue" \
+uv run playwright-api send "Continue" \
   --conversation '<conversation-id-or-https://chatgpt.com/c/...>' \
   --request-id personal-002
 ```
@@ -48,19 +48,19 @@ uv run playwright-gpt send "Continue" \
 Retrieve or wait for the exact final response without sending:
 
 ```bash
-uv run playwright-gpt get personal-002
+uv run playwright-api get personal-002
 ```
 
 Read local metadata only; this does not connect to Chromium or change coordination:
 
 ```bash
-uv run playwright-gpt status personal-002 --json
+uv run playwright-api status personal-002 --json
 ```
 
 Request cancellation:
 
 ```bash
-uv run playwright-gpt cancel personal-002
+uv run playwright-api cancel personal-002
 ```
 
 The complete command surface is `send`, `get`, `status`, and `cancel`. No retired command or library aliases are retained. There is no public `--wait-idle` or helper-tab retention option.
@@ -89,15 +89,15 @@ The Python API is authoritative. CLI JSON is a thin adapter over the same method
 import asyncio
 from pathlib import Path
 
-from playwright_gpt_core import ChatGPTCore, CoreConfig
+from playwright_api import ChatGPTClient, ClientConfig
 
 
 async def main() -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             cdp_endpoint="http://127.0.0.1:9222",
-            state_dir=Path(".playwright-gpt"),
-            coordination_dir=Path("/var/tmp/playwright-gpt-coordination"),
+            state_dir=Path(".playwright-api"),
+            coordination_dir=Path("/var/tmp/playwright-api-coordination"),
             deployment_id="shared-cdp-9222",
             timeout=300,
             poll=0.5,
@@ -173,7 +173,7 @@ JSON mode writes one result object to stdout. Diagnostics are not mixed into std
 Repository-local request/result state defaults to:
 
 ```text
-.playwright-gpt/
+.playwright-api/
 ├── turns/<request-id>.json
 ├── conversations/*.json
 └── locks/*.lock

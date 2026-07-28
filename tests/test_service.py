@@ -4,28 +4,28 @@ from pathlib import Path
 
 import pytest
 
-from playwright_gpt_core.config import CoreConfig
-from playwright_gpt_core.models import TurnRecord, TurnState
-from playwright_gpt_core.service import ChatGPTCore
+from playwright_api.config import ClientConfig
+from playwright_api.models import TurnRecord, TurnState
+from playwright_api.service import ChatGPTClient
 
 
 def test_relative_default_home_fails_before_store_construction(tmp_path, monkeypatch) -> None:
-    from playwright_gpt_core.errors import InvalidInputError
+    from playwright_api.errors import InvalidInputError
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", "relative-home")
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
 
     with pytest.raises(InvalidInputError, match="home directory must be absolute"):
-        ChatGPTCore(CoreConfig(state_dir=Path("local-state")))
+        ChatGPTClient(ClientConfig(state_dir=Path("local-state")))
 
     assert not (tmp_path / "local-state").exists()
     assert not (tmp_path / "relative-home").exists()
 
 
 def test_service_release_uses_atomic_coordination_primitive(tmp_path) -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="atomic-release-service",
@@ -56,8 +56,8 @@ def test_service_release_uses_atomic_coordination_primitive(tmp_path) -> None:
 async def test_terminal_release_is_idempotent_and_preserves_immediate_next_owner(
     tmp_path,
 ) -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="terminal-release-race",
@@ -74,8 +74,8 @@ async def test_terminal_release_is_idempotent_and_preserves_immediate_next_owner
 
 @pytest.mark.asyncio
 async def test_cancel_before_send_is_proven_without_browser(tmp_path) -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="service-test",
@@ -88,8 +88,8 @@ async def test_cancel_before_send_is_proven_without_browser(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_get_without_exact_identity_fails_closed_without_browser(tmp_path) -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="service-test",
@@ -107,8 +107,8 @@ async def test_get_without_exact_identity_fails_closed_without_browser(tmp_path)
 async def test_public_request_id_validation_precedes_state_coordination_and_browser(
     tmp_path, monkeypatch, operation: str, request_id
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import InvalidInputError
+    import playwright_api.service as service_module
+    from playwright_api.errors import InvalidInputError
 
     class ForbiddenBrowserSession:
         def __init__(self, _config) -> None:
@@ -117,8 +117,8 @@ async def test_public_request_id_validation_precedes_state_coordination_and_brow
     monkeypatch.setattr(service_module, "BrowserSession", ForbiddenBrowserSession)
     state_dir = tmp_path / "state"
     coordination_dir = tmp_path / "coordination"
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=state_dir,
             coordination_dir=coordination_dir,
             deployment_id="request-id-validation",
@@ -142,18 +142,18 @@ async def test_public_request_id_validation_precedes_state_coordination_and_brow
 
 @pytest.mark.asyncio
 async def test_duplicate_public_request_id_fails_before_browser_access(tmp_path) -> None:
-    from playwright_gpt_core.errors import OwnershipConflictError
+    from playwright_api.errors import OwnershipConflictError
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="service-test",
         )
     )
     core.store.create(TurnRecord.new(request_id="duplicate", prompt="first"))
-    from playwright_gpt_core.cli import EXIT_INVARIANT, exit_code
-    from playwright_gpt_core.models import Result
+    from playwright_api.cli import EXIT_INVARIANT, exit_code
+    from playwright_api.models import Result
 
     with pytest.raises(OwnershipConflictError) as captured:
         await core.send("second", fresh=True, request_id="duplicate")
@@ -167,11 +167,11 @@ async def test_duplicate_public_request_id_fails_before_browser_access(tmp_path)
 
 @pytest.mark.asyncio
 async def test_preparing_cancel_blocks_stale_sender_before_click_boundary(tmp_path) -> None:
-    from playwright_gpt_core.errors import ConcurrentStateError
-    from playwright_gpt_core.models import SendProvenance
+    from playwright_api.errors import ConcurrentStateError
+    from playwright_api.models import SendProvenance
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="service-test",
@@ -314,13 +314,13 @@ class _AtomicPage(_FakePage):
 
 
 def _persist_running_request(
-    core: ChatGPTCore,
+    core: ChatGPTClient,
     *,
     request_id: str,
     conversation_id: str,
     helper_target_id: str | None = None,
 ) -> TurnRecord:
-    from playwright_gpt_core.models import SendProvenance, TurnIdentity
+    from playwright_api.models import SendProvenance, TurnIdentity
 
     identity = TurnIdentity(
         conversation_id=conversation_id,
@@ -373,14 +373,14 @@ def _persist_running_request(
 async def test_pre_click_playwright_failure_releases_claim_and_closes_helper(
     tmp_path, monkeypatch, browser_error, expected_category
 ) -> None:
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     page = _FakePage("target-timeout", goto_error=browser_error)
     _FakeBrowserSession.context_value = _FakeContext(page)
     monkeypatch.setattr(service_module, "BrowserSession", _FakeBrowserSession)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="service-test",
@@ -412,10 +412,10 @@ async def test_pre_click_playwright_failure_releases_claim_and_closes_helper(
 async def test_preclick_manual_state_preserves_exact_page(
     tmp_path, monkeypatch, page_kind: str, drift: str
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.frontend import FrontendState
-    from playwright_gpt_core.models import SendProvenance
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.frontend import FrontendState
+    from playwright_api.models import SendProvenance
+    from playwright_api.monitor import MonitorSnapshot
 
     conversation_id = f"manual-{page_kind}-{drift}"
     created = _FakePage("created-target")
@@ -488,8 +488,8 @@ async def test_preclick_manual_state_preserves_exact_page(
     monkeypatch.setattr(service_module, "fill_composer", fill)
     monkeypatch.setattr(service_module, "send_real", forbidden_send)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="manual-state-preservation",
@@ -541,11 +541,11 @@ async def test_preclick_manual_state_preserves_exact_page(
 async def test_cancel_race_still_durably_preserves_owned_manual_page(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import ConcurrentStateError
-    from playwright_gpt_core.frontend import FrontendState
-    from playwright_gpt_core.models import SendProvenance
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.errors import ConcurrentStateError
+    from playwright_api.frontend import FrontendState
+    from playwright_api.models import SendProvenance
+    from playwright_api.monitor import MonitorSnapshot
 
     conversation_id = "manual-cancel-race"
     request_id = "manual-cancel-race-request"
@@ -565,7 +565,7 @@ async def test_cancel_race_still_durably_preserves_owned_manual_page(
     cancel_result = None
     inject_retention_conflict = False
     retention_conflicts = 0
-    core: ChatGPTCore
+    core: ChatGPTClient
 
     async def observe(active_page):
         nonlocal observations, cancel_result, inject_retention_conflict
@@ -616,8 +616,8 @@ async def test_cancel_race_still_durably_preserves_owned_manual_page(
     monkeypatch.setattr(service_module, "fill_composer", fill)
     monkeypatch.setattr(service_module, "send_real", forbidden_send)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="manual-cancel-race",
@@ -674,10 +674,10 @@ async def test_preclick_cancel_is_one_atomic_save_under_manual_state_race(
     import asyncio
     import threading
 
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.frontend import FrontendState
-    from playwright_gpt_core.models import SendProvenance
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.frontend import FrontendState
+    from playwright_api.models import SendProvenance
+    from playwright_api.monitor import MonitorSnapshot
 
     conversation_id = "atomic-preclick-cancel"
     request_id = "atomic-preclick-cancel-request"
@@ -712,15 +712,15 @@ async def test_preclick_cancel_is_one_atomic_save_under_manual_state_race(
     monkeypatch.setattr(service_module, "fill_composer", fill)
     monkeypatch.setattr(service_module, "send_real", forbidden_send)
 
-    config = CoreConfig(
+    config = ClientConfig(
         state_dir=tmp_path / "state",
         coordination_dir=tmp_path / "coordination",
         deployment_id="atomic-preclick-cancel",
         poll=0.001,
         timeout=1,
     )
-    sender = ChatGPTCore(config)
-    canceller = ChatGPTCore(config)
+    sender = ChatGPTClient(config)
+    canceller = ChatGPTClient(config)
     cancel_saved = threading.Event()
     retention_saved = threading.Event()
     cancel_saves = []
@@ -818,9 +818,9 @@ async def test_preclick_cancel_is_one_atomic_save_under_manual_state_race(
 async def test_atomic_send_rejects_same_target_navigation_after_python_preflight(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.frontend import click_send_atomic
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.frontend import click_send_atomic
+    from playwright_api.monitor import MonitorSnapshot
 
     conversation_id = "conversation-race"
     page = _AtomicPage(
@@ -841,7 +841,7 @@ async def test_atomic_send_rejects_same_target_navigation_after_python_preflight
 
     async def observe(_page):
         nonlocal observations
-        from playwright_gpt_core.frontend import FrontendState
+        from playwright_api.frontend import FrontendState
 
         observations += 1
         return FrontendState(
@@ -888,8 +888,8 @@ async def test_atomic_send_rejects_same_target_navigation_after_python_preflight
     monkeypatch.setattr(service_module, "observe_frontend", observe)
     monkeypatch.setattr(service_module, "send_real", fake_send_real)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="atomic-send-test",
@@ -914,8 +914,8 @@ async def test_atomic_send_rejects_same_target_navigation_after_python_preflight
 async def test_get_navigation_failure_requires_same_id_get(tmp_path, monkeypatch) -> None:
     from playwright.async_api import Error as PlaywrightError
 
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.cli import EXIT_RECOVERABLE_EXTERNAL, exit_code
+    import playwright_api.service as service_module
+    from playwright_api.cli import EXIT_RECOVERABLE_EXTERNAL, exit_code
 
     conversation_id = "get-navigation-failure"
     page = _FakePage(
@@ -926,8 +926,8 @@ async def test_get_navigation_failure_requires_same_id_get(tmp_path, monkeypatch
     _FakeBrowserSession.context_value = context
     monkeypatch.setattr(service_module, "BrowserSession", _FakeBrowserSession)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="get-navigation-test",
@@ -955,7 +955,7 @@ async def test_get_target_identification_failure_closes_new_helper(
 ) -> None:
     from playwright.async_api import Error as PlaywrightError
 
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     conversation_id = "get-target-failure"
     page = _FakePage("created-target")
@@ -975,8 +975,8 @@ async def test_get_target_identification_failure_closes_new_helper(
     _FakeBrowserSession.context_value = Context()
     monkeypatch.setattr(service_module, "BrowserSession", _FakeBrowserSession)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="get-target-test",
@@ -1000,8 +1000,8 @@ async def test_get_target_identification_failure_closes_new_helper(
 async def test_cancel_rejects_duplicate_exact_pages_without_click(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.monitor import MonitorSnapshot
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-duplicate-pages"
@@ -1048,8 +1048,8 @@ async def test_cancel_rejects_duplicate_exact_pages_without_click(
     monkeypatch.setattr(service_module, "verify_authenticated", noop)
     monkeypatch.setattr(service_module, "find_stop_button", find_stop)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-duplicate-test",
@@ -1076,8 +1076,8 @@ async def test_cancel_rejects_duplicate_exact_pages_without_click(
 
 @pytest.mark.asyncio
 async def test_cancel_borrows_unique_exact_page_without_closing(tmp_path, monkeypatch) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.monitor import MonitorSnapshot
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-borrowed-page"
@@ -1124,8 +1124,8 @@ async def test_cancel_borrows_unique_exact_page_without_closing(tmp_path, monkey
     monkeypatch.setattr(service_module, "verify_authenticated", noop)
     monkeypatch.setattr(service_module, "find_stop_button", find_stop)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-borrowed-test",
@@ -1150,8 +1150,8 @@ async def test_cancel_borrows_unique_exact_page_without_closing(tmp_path, monkey
 
 @pytest.mark.asyncio
 async def test_cancel_closes_only_created_exact_page(tmp_path, monkeypatch) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.monitor import MonitorSnapshot
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-created-page"
@@ -1197,8 +1197,8 @@ async def test_cancel_closes_only_created_exact_page(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(service_module, "verify_authenticated", noop)
     monkeypatch.setattr(service_module, "find_stop_button", find_stop)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-created-test",
@@ -1226,11 +1226,11 @@ async def test_cancel_closes_only_created_exact_page(tmp_path, monkeypatch) -> N
 async def test_frontend_accepted_transient_backend_failure_then_watch_closes_exact_helper(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import BackendUnavailableError
-    from playwright_gpt_core.models import TurnIdentity
-    from playwright_gpt_core.monitor import MonitorSnapshot
-    from playwright_gpt_core.transport import FrontendAcceptance, FrontendHandoff
+    import playwright_api.service as service_module
+    from playwright_api.errors import BackendUnavailableError
+    from playwright_api.models import TurnIdentity
+    from playwright_api.monitor import MonitorSnapshot
+    from playwright_api.transport import FrontendAcceptance, FrontendHandoff
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "conversation-recovery"
@@ -1288,7 +1288,7 @@ async def test_frontend_accepted_transient_backend_failure_then_watch_closes_exa
 
     async def observe(page):
         nonlocal frontend_observations
-        from playwright_gpt_core.frontend import FrontendState
+        from playwright_api.frontend import FrontendState
 
         frontend_observations += 1
         return FrontendState(
@@ -1344,8 +1344,8 @@ async def test_frontend_accepted_transient_backend_failure_then_watch_closes_exa
     monkeypatch.setattr(service_module, "observe_frontend", observe)
     monkeypatch.setattr(service_module, "send_real", fake_send_real)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="service-test",
@@ -1385,8 +1385,8 @@ async def test_frontend_accepted_transient_backend_failure_then_watch_closes_exa
 
 @pytest.mark.asyncio
 async def test_recovery_respects_durable_keep_helper_policy(tmp_path) -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="service-test",
@@ -1411,15 +1411,15 @@ async def test_recovery_respects_durable_keep_helper_policy(tmp_path) -> None:
 async def test_terminal_request_retries_exact_helper_cleanup(
     tmp_path, monkeypatch, operation
 ) -> None:
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     helper = _FakePage("terminal-helper")
     unrelated = _FakePage("terminal-unrelated")
     _FakeBrowserSession.context_value = _FakeContext(helper, [unrelated])
     monkeypatch.setattr(service_module, "BrowserSession", _FakeBrowserSession)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="service-test",
@@ -1468,13 +1468,13 @@ async def test_malformed_helper_state_fails_before_browser_or_ownership_mutation
 ) -> None:
     import json
 
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import CorruptStateError
+    import playwright_api.service as service_module
+    from playwright_api.errors import CorruptStateError
 
     conversation_id = "corrupt-helper-conversation"
     request_id = "corrupt-helper-request"
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path,
             coordination_dir=tmp_path / "coordination",
             deployment_id="service-test",
@@ -1521,12 +1521,12 @@ async def test_malformed_helper_state_fails_before_browser_or_ownership_mutation
 async def test_cancel_rejects_foreign_shared_owner_before_browser(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.models import SendProvenance, TurnIdentity
+    import playwright_api.service as service_module
+    from playwright_api.models import SendProvenance, TurnIdentity
 
     conversation_id = "foreign-owner-conversation"
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "local-state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="shared-browser",
@@ -1561,7 +1561,7 @@ async def test_cancel_rejects_foreign_shared_owner_before_browser(
 
     result = await core.cancel(record.request_id)
 
-    from playwright_gpt_core.cli import EXIT_CANCELLATION_UNPROVEN, exit_code
+    from playwright_api.cli import EXIT_CANCELLATION_UNPROVEN, exit_code
 
     assert result.state == TurnState.UNKNOWN
     assert result.disposition == "cancellation_unproven"
@@ -1577,9 +1577,9 @@ async def test_cancel_rejects_foreign_shared_owner_before_browser(
 async def test_cancel_terminal_observation_requires_graph_convergence(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.models import SendProvenance, TurnIdentity
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.models import SendProvenance, TurnIdentity
+    from playwright_api.monitor import MonitorSnapshot
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-convergence-conversation"
@@ -1621,8 +1621,8 @@ async def test_cancel_terminal_observation_requires_graph_convergence(
     monkeypatch.setattr(service_module, "BrowserSession", _FakeBrowserSession)
     monkeypatch.setattr(service_module, "AuthenticatedBackend", Backend)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-test",
@@ -1660,9 +1660,9 @@ async def test_cancel_terminal_observation_requires_graph_convergence(
 
 @pytest.mark.asyncio
 async def test_cancel_convergence_resets_across_running_snapshot(tmp_path, monkeypatch) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.models import SendProvenance, TurnIdentity
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.models import SendProvenance, TurnIdentity
+    from playwright_api.monitor import MonitorSnapshot
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-reset-running"
@@ -1718,8 +1718,8 @@ async def test_cancel_convergence_resets_across_running_snapshot(tmp_path, monke
     monkeypatch.setattr(service_module, "verify_authenticated", noop)
     monkeypatch.setattr(service_module, "find_stop_button", find_stop)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-reset-test",
@@ -1757,8 +1757,8 @@ async def test_cancel_convergence_resets_across_running_snapshot(tmp_path, monke
 
 @pytest.mark.asyncio
 async def test_cancel_convergence_resets_when_exact_candidate_disappears(tmp_path) -> None:
-    from playwright_gpt_core.models import SendProvenance, TurnIdentity
-    from playwright_gpt_core.monitor import CandidateConvergence
+    from playwright_api.models import SendProvenance, TurnIdentity
+    from playwright_api.monitor import CandidateConvergence
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-reset-missing"
@@ -1780,8 +1780,8 @@ async def test_cancel_convergence_resets_when_exact_candidate_disappears(tmp_pat
         message("root", "system", None, turn=None, request=None),
         current="root",
     )
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-reset-test",
@@ -1835,14 +1835,14 @@ async def test_turn_file_payload_identity_mismatch_fails_before_browser_or_claim
 ) -> None:
     import json
 
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import CorruptStateError
+    import playwright_api.service as service_module
+    from playwright_api.errors import CorruptStateError
 
     conversation_id = "poisoned-request-conversation"
     requested_id = "requested-id"
     payload_id = "different-id"
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="poisoned-request-test",
@@ -1879,8 +1879,8 @@ async def test_turn_file_payload_identity_mismatch_fails_before_browser_or_claim
 
 @pytest.mark.asyncio
 async def test_cancel_raw_secret_mutation_requires_fresh_consecutive_samples(tmp_path) -> None:
-    from playwright_gpt_core.models import SendProvenance, TurnIdentity
-    from playwright_gpt_core.monitor import CandidateConvergence
+    from playwright_api.models import SendProvenance, TurnIdentity
+    from playwright_api.monitor import CandidateConvergence
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-raw-secret-mutation"
@@ -1901,8 +1901,8 @@ async def test_cancel_raw_secret_mutation_requires_fresh_consecutive_samples(tmp
             current="assistant-1",
         )
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-raw-secret-test",
@@ -1965,14 +1965,14 @@ async def test_unknown_nested_identity_field_fails_before_browser_or_claim_mutat
 ) -> None:
     import json
 
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import CorruptStateError
-    from playwright_gpt_core.models import TurnIdentity
+    import playwright_api.service as service_module
+    from playwright_api.errors import CorruptStateError
+    from playwright_api.models import TurnIdentity
 
     conversation_id = "unknown-identity-conversation"
     request_id = "unknown-identity-request"
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="unknown-identity-test",
@@ -2024,10 +2024,10 @@ async def test_fresh_send_rejects_url_suffix_before_click_boundary(
     replacement_phase: str,
     expected_fill_count: int,
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import FrontendNotReadyError
-    from playwright_gpt_core.frontend import FrontendState
-    from playwright_gpt_core.models import SendProvenance
+    import playwright_api.service as service_module
+    from playwright_api.errors import FrontendNotReadyError
+    from playwright_api.frontend import FrontendState
+    from playwright_api.models import SendProvenance
 
     page = _FakePage("fresh-target")
     context = _FakeContext(page)
@@ -2088,8 +2088,8 @@ async def test_fresh_send_rejects_url_suffix_before_click_boundary(
     monkeypatch.setattr(service_module, "fill_composer", fill)
     monkeypatch.setattr(service_module, "send_real", fail_send)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="fresh-url-suffix-test",
@@ -2117,10 +2117,10 @@ async def test_fresh_send_rejects_url_suffix_before_click_boundary(
 async def test_send_ignores_noncanonical_conversation_page_before_composer_mutation(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import FrontendNotReadyError
-    from playwright_gpt_core.frontend import FrontendState
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.errors import FrontendNotReadyError
+    from playwright_api.frontend import FrontendState
+    from playwright_api.monitor import MonitorSnapshot
 
     conversation_id = "send-canonical-page"
     unsupported = _FakePage(
@@ -2186,8 +2186,8 @@ async def test_send_ignores_noncanonical_conversation_page_before_composer_mutat
     monkeypatch.setattr(service_module, "fill_composer", fill)
     monkeypatch.setattr(service_module, "send_real", fail_send)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="send-canonical-test",
@@ -2213,7 +2213,7 @@ async def test_send_ignores_noncanonical_conversation_page_before_composer_mutat
 async def test_get_ignores_noncanonical_conversation_page(tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     conversation_id = "get-canonical-page"
     unsupported = _FakePage(
@@ -2239,8 +2239,8 @@ async def test_get_ignores_noncanonical_conversation_page(tmp_path, monkeypatch)
     monkeypatch.setattr(service_module, "verify_authenticated", noop)
     monkeypatch.setattr(service_module, "monitor_live", monitor)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="get-canonical-test",
@@ -2264,8 +2264,8 @@ async def test_get_ignores_noncanonical_conversation_page(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_cancel_ignores_noncanonical_conversation_page(tmp_path, monkeypatch) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.monitor import MonitorSnapshot
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-canonical-page"
@@ -2315,8 +2315,8 @@ async def test_cancel_ignores_noncanonical_conversation_page(tmp_path, monkeypat
     monkeypatch.setattr(service_module, "verify_authenticated", noop)
     monkeypatch.setattr(service_module, "find_stop_button", find_stop)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-canonical-test",
@@ -2344,9 +2344,9 @@ async def test_cancel_ignores_noncanonical_conversation_page(tmp_path, monkeypat
 async def test_cancel_stop_lookup_failure_requires_same_id_get(tmp_path, monkeypatch) -> None:
     from playwright.async_api import Error as PlaywrightError
 
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.cli import EXIT_RECOVERABLE_EXTERNAL, exit_code
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.cli import EXIT_RECOVERABLE_EXTERNAL, exit_code
+    from playwright_api.monitor import MonitorSnapshot
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-lookup-failure"
@@ -2382,8 +2382,8 @@ async def test_cancel_stop_lookup_failure_requires_same_id_get(tmp_path, monkeyp
     monkeypatch.setattr(service_module, "AuthenticatedBackend", Backend)
     monkeypatch.setattr(service_module, "verify_authenticated", noop)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-lookup-test",
@@ -2416,9 +2416,9 @@ async def test_cancel_stop_click_failure_is_cancellation_unproven(
     from playwright.async_api import Error as PlaywrightError
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.cli import EXIT_CANCELLATION_UNPROVEN, exit_code
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.cli import EXIT_CANCELLATION_UNPROVEN, exit_code
+    from playwright_api.monitor import MonitorSnapshot
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = f"cancel-click-{click_error_kind}"
@@ -2460,8 +2460,8 @@ async def test_cancel_stop_click_failure_is_cancellation_unproven(
     monkeypatch.setattr(service_module, "verify_authenticated", noop)
     monkeypatch.setattr(service_module, "find_stop_button", find_stop)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-click-test",
@@ -2490,9 +2490,9 @@ async def test_cancel_stop_click_failure_is_cancellation_unproven(
 async def test_cancel_post_click_timeout_is_cancellation_unproven(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.cli import EXIT_CANCELLATION_UNPROVEN, exit_code
-    from playwright_gpt_core.monitor import MonitorSnapshot
+    import playwright_api.service as service_module
+    from playwright_api.cli import EXIT_CANCELLATION_UNPROVEN, exit_code
+    from playwright_api.monitor import MonitorSnapshot
     from tests.fixtures.graph_factory import graph, message
 
     conversation_id = "cancel-post-click-timeout"
@@ -2534,8 +2534,8 @@ async def test_cancel_post_click_timeout_is_cancellation_unproven(
     monkeypatch.setattr(service_module, "verify_authenticated", noop)
     monkeypatch.setattr(service_module, "find_stop_button", find_stop)
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="cancel-post-click-test",

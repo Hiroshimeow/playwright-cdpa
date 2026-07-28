@@ -5,22 +5,22 @@ import stat
 
 import pytest
 
-from playwright_gpt_core.config import CoreConfig
-from playwright_gpt_core.errors import OwnershipConflictError
-from playwright_gpt_core.service import ChatGPTCore
+from playwright_api.config import ClientConfig
+from playwright_api.errors import OwnershipConflictError
+from playwright_api.service import ChatGPTClient
 
 
 def test_different_result_stores_share_one_deployment_claim(tmp_path) -> None:
     coordination = tmp_path / "coordination"
-    first = ChatGPTCore(
-        CoreConfig(
+    first = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "repo-a",
             coordination_dir=coordination,
             deployment_id="shared-browser",
         )
     )
-    second = ChatGPTCore(
-        CoreConfig(
+    second = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "repo-b",
             coordination_dir=coordination,
             deployment_id="shared-browser",
@@ -36,15 +36,15 @@ def test_different_result_stores_share_one_deployment_claim(tmp_path) -> None:
 
 
 def test_deployment_namespaces_isolate_explicit_browser_profiles(tmp_path) -> None:
-    first = ChatGPTCore(
-        CoreConfig(
+    first = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "repo-a",
             coordination_dir=tmp_path / "coordination",
             deployment_id="profile-a",
         )
     )
-    second = ChatGPTCore(
-        CoreConfig(
+    second = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "repo-b",
             coordination_dir=tmp_path / "coordination",
             deployment_id="profile-b",
@@ -59,8 +59,8 @@ def test_deployment_namespaces_isolate_explicit_browser_profiles(tmp_path) -> No
 
 def test_coordination_state_is_private_and_contains_no_result_store_path(tmp_path) -> None:
     state_dir = tmp_path / "private-repository-state"
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=state_dir,
             coordination_dir=tmp_path / "coordination",
             deployment_id="shared-browser",
@@ -91,15 +91,15 @@ async def test_deadline_claim_does_not_bypass_held_conversation_lock(
     tmp_path, monkeypatch
 ) -> None:
     coordination = tmp_path / "coordination"
-    owner = ChatGPTCore(
-        CoreConfig(
+    owner = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "owner-state",
             coordination_dir=coordination,
             deployment_id="shared-browser",
         )
     )
-    contender = ChatGPTCore(
-        CoreConfig(
+    contender = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "contender-state",
             coordination_dir=coordination,
             deployment_id="shared-browser",
@@ -112,7 +112,7 @@ async def test_deadline_claim_does_not_bypass_held_conversation_lock(
     async def forbidden_send_record(*_args, **_kwargs):
         raise AssertionError("losing contender must not create or send a local request")
 
-    monkeypatch.setattr(ChatGPTCore, "_send_record", forbidden_send_record)
+    monkeypatch.setattr(ChatGPTClient, "_send_record", forbidden_send_record)
 
     with owner.coordination.lock("conversation-1", timeout=0):
         owner.coordination.release("conversation-1", "foreign-request", terminal=True)
@@ -129,18 +129,18 @@ async def test_deadline_claim_does_not_bypass_held_conversation_lock(
 
 @pytest.mark.asyncio
 async def test_owner_release_at_deadline_gets_final_atomic_claim(tmp_path, monkeypatch) -> None:
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     coordination = tmp_path / "coordination"
-    owner = ChatGPTCore(
-        CoreConfig(
+    owner = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "owner-state",
             coordination_dir=coordination,
             deployment_id="shared-browser",
         )
     )
-    contender = ChatGPTCore(
-        CoreConfig(
+    contender = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "contender-state",
             coordination_dir=coordination,
             deployment_id="shared-browser",
@@ -191,15 +191,15 @@ async def test_owner_release_at_deadline_gets_final_atomic_claim(tmp_path, monke
 @pytest.mark.asyncio
 async def test_foreign_claim_fails_without_loading_foreign_turn_state(tmp_path) -> None:
     coordination = tmp_path / "coordination"
-    owner = ChatGPTCore(
-        CoreConfig(
+    owner = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "repo-a",
             coordination_dir=coordination,
             deployment_id="shared-browser",
         )
     )
-    contender = ChatGPTCore(
-        CoreConfig(
+    contender = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "repo-b",
             coordination_dir=coordination,
             deployment_id="shared-browser",
@@ -213,7 +213,7 @@ async def test_foreign_claim_fails_without_loading_foreign_turn_state(tmp_path) 
         "next", conversation="conversation-1", request_id="contender-request"
     )
 
-    from playwright_gpt_core.cli import EXIT_OWNERSHIP, exit_code
+    from playwright_api.cli import EXIT_OWNERSHIP, exit_code
 
     assert result.disposition == "ownership_timeout"
     assert result.failure is not None
@@ -226,15 +226,15 @@ async def test_foreign_claim_fails_without_loading_foreign_turn_state(tmp_path) 
 @pytest.mark.asyncio
 async def test_wait_idle_polls_shared_claim_without_foreign_state_lookup(tmp_path) -> None:
     coordination = tmp_path / "coordination"
-    owner = ChatGPTCore(
-        CoreConfig(
+    owner = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "repo-a",
             coordination_dir=coordination,
             deployment_id="shared-browser",
         )
     )
-    contender = ChatGPTCore(
-        CoreConfig(
+    contender = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "repo-b",
             coordination_dir=coordination,
             deployment_id="shared-browser",
@@ -250,7 +250,7 @@ async def test_wait_idle_polls_shared_claim_without_foreign_state_lookup(tmp_pat
         request_id="waiting-request",
     )
 
-    from playwright_gpt_core.cli import EXIT_OWNERSHIP, exit_code
+    from playwright_api.cli import EXIT_OWNERSHIP, exit_code
 
     assert result.disposition == "ownership_timeout"
     assert result.failure is not None
@@ -273,10 +273,10 @@ async def test_wait_idle_polls_shared_claim_without_foreign_state_lookup(tmp_pat
     ],
 )
 def test_coordination_record_rejects_coerced_scalars(tmp_path, field, malformed) -> None:
-    from playwright_gpt_core.errors import CorruptStateError
+    from playwright_api.errors import CorruptStateError
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="strict-coordination",

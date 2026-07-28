@@ -2,14 +2,14 @@
 
 Date: 2026-07-27
 
-All commands ran from `/home/ayumi/Workspace/git_project/playwright-gpt-internal` against loopback CDP 9222. The disposable conversation identifier is shown as `6a66383f…fc90`. Result/state roots were under `/tmp`. Public JSON identifiers were truncated by the CLI. No `browser.close()` was called.
+All commands ran from `/home/ayumi/Workspace/git_project/playwright-api-internal` against loopback CDP 9222. The disposable conversation identifier is shown as `6a66383f…fc90`. Result/state roots were under `/tmp`. Public JSON identifiers were truncated by the CLI. No `browser.close()` was called.
 
 ## 1. Fresh Send followed by exact result
 
 Command:
 
 ```bash
-uv run playwright-gpt send 'Reply with exactly API_V2_LIVE_OK' \
+uv run playwright-api send 'Reply with exactly API_V2_LIVE_OK' \
   --fresh \
   --request-id live-fresh-20260727b \
   --state-dir /tmp/pgpt-api-v2-live-a \
@@ -35,7 +35,7 @@ An earlier fresh attempt exited 10 with `frontend_not_ready` because the newly o
 Command:
 
 ```bash
-uv run playwright-gpt send 'Reply with exactly API_V2_SECOND_OK' \
+uv run playwright-api send 'Reply with exactly API_V2_SECOND_OK' \
   --conversation '6a66383f…fc90' \
   --request-id live-second-20260727 \
   --state-dir /tmp/pgpt-api-v2-live-a \
@@ -99,7 +99,7 @@ After the correction, command shape:
 
 ```bash
 # process 1
-uv run playwright-gpt send '<120-line fixture>' \
+uv run playwright-api send '<120-line fixture>' \
   --conversation '6a66383f…fc90' \
   --request-id live-active-get-retry-20260727 \
   --state-dir /tmp/pgpt-api-v2-live-d \
@@ -108,7 +108,7 @@ uv run playwright-gpt send '<120-line fixture>' \
   --timeout 300 --poll 0.25 --json
 
 # process 2, launched after persisted state reached SENT
-uv run playwright-gpt get live-active-get-retry-20260727 \
+uv run playwright-api get live-active-get-retry-20260727 \
   --state-dir /tmp/pgpt-api-v2-live-d \
   --coordination-dir /tmp/pgpt-api-v2-live-coordination \
   --deployment-id cdp-9222-api-v2-live \
@@ -134,7 +134,7 @@ The one exact disposable conversation page was closed with `page.close()`; Chrom
 Command:
 
 ```bash
-uv run playwright-gpt get live-active-get-retry-20260727 \
+uv run playwright-api get live-active-get-retry-20260727 \
   --state-dir /tmp/pgpt-api-v2-live-d \
   --coordination-dir /tmp/pgpt-api-v2-live-coordination \
   --deployment-id cdp-9222-api-v2-live \
@@ -158,7 +158,7 @@ The missing helper caused exact URL recovery. No Send was created.
 Fixture command shape:
 
 ```bash
-uv run playwright-gpt send '<90-line fixture>' \
+uv run playwright-api send '<90-line fixture>' \
   --conversation '6a66383f…fc90' \
   --request-id live-restart-get-20260727 \
   --state-dir /tmp/pgpt-api-v2-live-e \
@@ -178,7 +178,7 @@ failure = backend GET failed with HTTP 429
 No resend was issued. Later command:
 
 ```bash
-uv run playwright-gpt get live-restart-get-20260727 \
+uv run playwright-api get live-restart-get-20260727 \
   --state-dir /tmp/pgpt-api-v2-live-e \
   --coordination-dir /tmp/pgpt-api-v2-live-coordination \
   --deployment-id cdp-9222-api-v2-live \
@@ -202,7 +202,7 @@ This proves same-ID restart recovery and one submitted user node despite an exte
 A separate process held the exact conversation claim as `foreign-live-owner` for three seconds using the same absolute coordination root/deployment ID. The contender used a different local state root:
 
 ```bash
-uv run playwright-gpt send 'Reply with exactly SHARED_OWNER_SERIALIZED_OK' \
+uv run playwright-api send 'Reply with exactly SHARED_OWNER_SERIALIZED_OK' \
   --conversation '6a66383f…fc90' \
   --request-id live-shared-owner-20260727 \
   --state-dir /tmp/pgpt-api-v2-live-b \

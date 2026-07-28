@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .errors import ConcurrentStateError, CorruptStateError, OwnershipConflictError
+from .locking import FileLock
 from .models import ConversationRecord, TurnRecord
 from .redaction import redact
 
@@ -146,16 +146,8 @@ class StateStore:
     @contextmanager
     def record_lock(self, kind: str, identity: str) -> Iterator[None]:
         digest = hashlib.sha256(f"{kind}:{identity}".encode("utf-8")).hexdigest()
-        path = self.locks_dir / f"{digest}.lock"
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(path.parent, 0o700)
-        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        with FileLock(self.locks_dir / f"{digest}.lock", timeout=30.0):
             yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
 
     def _load(self, path: Path, parser: Any) -> Any:
         try:

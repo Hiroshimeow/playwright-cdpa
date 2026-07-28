@@ -18,7 +18,7 @@ from playwright.async_api import (
 )
 
 from .backend import AuthenticatedBackend
-from .config import CoreConfig
+from .config import ClientConfig
 from .connection import (
     BrowserSession,
     ConversationPage,
@@ -90,9 +90,9 @@ _TERMINAL_STREAM = {
 }
 
 
-class ChatGPTCore:
-    def __init__(self, config: CoreConfig | None = None) -> None:
-        self.config = (config or CoreConfig()).validated()
+class ChatGPTClient:
+    def __init__(self, config: ClientConfig | None = None) -> None:
+        self.config = (config or ClientConfig()).validated()
         self.store = StateStore(self.config.state_dir)
         self._coordination: CoordinationStore | None = None
 

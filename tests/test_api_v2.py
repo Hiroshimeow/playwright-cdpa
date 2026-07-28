@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from playwright_gpt_core.cli import (
+from playwright_api.cli import (
     EXIT_AMBIGUOUS,
     EXIT_CANCELLATION_UNPROVEN,
     EXIT_CANCELLED,
@@ -15,17 +15,17 @@ from playwright_gpt_core.cli import (
     build_parser,
     exit_code,
 )
-from playwright_gpt_core.config import CoreConfig
-from playwright_gpt_core.errors import ConflictingIdentityError, Failure, FailureCategory
-from playwright_gpt_core.models import Result, SendProvenance, TurnRecord, TurnState
-from playwright_gpt_core.service import ChatGPTCore
+from playwright_api.config import ClientConfig
+from playwright_api.errors import ConflictingIdentityError, Failure, FailureCategory
+from playwright_api.models import Result, SendProvenance, TurnRecord, TurnState
+from playwright_api.service import ChatGPTClient
 
 
 @pytest.mark.asyncio
 async def test_existing_send_claims_before_creating_local_turn(tmp_path, monkeypatch) -> None:
     coordination = tmp_path / "coordination"
-    owner = ChatGPTCore(
-        CoreConfig(
+    owner = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "owner",
             coordination_dir=coordination,
             deployment_id="shared",
@@ -33,8 +33,8 @@ async def test_existing_send_claims_before_creating_local_turn(tmp_path, monkeyp
             poll=0.001,
         )
     )
-    contender = ChatGPTCore(
-        CoreConfig(
+    contender = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "contender",
             coordination_dir=coordination,
             deployment_id="shared",
@@ -53,7 +53,7 @@ async def test_existing_send_claims_before_creating_local_turn(tmp_path, monkeyp
         assert self.coordination.load(conversation_id).active_request_id == record.request_id
         return self._result(record)
 
-    monkeypatch.setattr(ChatGPTCore, "_send_record", fake_send_record)
+    monkeypatch.setattr(ChatGPTClient, "_send_record", fake_send_record)
     task = asyncio.create_task(
         contender.send(
             "next",
@@ -77,16 +77,16 @@ async def test_competing_existing_sends_create_only_winning_local_turn(
     tmp_path, monkeypatch
 ) -> None:
     coordination = tmp_path / "coordination"
-    blocker = ChatGPTCore(
-        CoreConfig(
+    blocker = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "blocker",
             coordination_dir=coordination,
             deployment_id="shared",
         )
     )
     contenders = [
-        ChatGPTCore(
-            CoreConfig(
+        ChatGPTClient(
+            ClientConfig(
                 state_dir=tmp_path / name,
                 coordination_dir=coordination,
                 deployment_id="shared",
@@ -121,7 +121,7 @@ async def test_competing_existing_sends_create_only_winning_local_turn(
         await hold.wait()
         return self._result(record)
 
-    monkeypatch.setattr(ChatGPTCore, "_send_record", fake_send_record)
+    monkeypatch.setattr(ChatGPTClient, "_send_record", fake_send_record)
     tasks = [
         asyncio.create_task(
             core.send(
@@ -155,7 +155,7 @@ async def test_competing_existing_sends_create_only_winning_local_turn(
 
 
 def test_status_is_local_only_and_does_not_create_coordination(tmp_path, monkeypatch) -> None:
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     class ForbiddenBrowserSession:
         def __init__(self, _config) -> None:
@@ -163,8 +163,8 @@ def test_status_is_local_only_and_does_not_create_coordination(tmp_path, monkeyp
 
     monkeypatch.setattr(service_module, "BrowserSession", ForbiddenBrowserSession)
     coordination = tmp_path / "coordination"
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=coordination,
             deployment_id="shared",
@@ -363,9 +363,9 @@ def test_primary_cli_surface_is_send_get_status_cancel_only() -> None:
         ["send", "hello", "--fresh", "--request-id", "caller-id", "--json"]
     )
     assert args.request_id == "caller-id"
-    assert not hasattr(ChatGPTCore, "watch")
-    assert not hasattr(ChatGPTCore, "recover")
-    assert not hasattr(ChatGPTCore, "wait_idle_and_send")
+    assert not hasattr(ChatGPTClient, "watch")
+    assert not hasattr(ChatGPTClient, "recover")
+    assert not hasattr(ChatGPTClient, "wait_idle_and_send")
 
 
 class _CDP:
@@ -411,7 +411,7 @@ class _Context:
 
 @pytest.mark.asyncio
 async def test_exact_page_resolver_borrows_one_exact_page() -> None:
-    from playwright_gpt_core.connection import resolve_conversation_page
+    from playwright_api.connection import resolve_conversation_page
 
     exact = _Page("exact-target", "https://chatgpt.com/c/conversation-1")
     unrelated = _Page("other-target", "https://chatgpt.com/c/conversation-2")
@@ -424,7 +424,7 @@ async def test_exact_page_resolver_borrows_one_exact_page() -> None:
 
 @pytest.mark.asyncio
 async def test_exact_page_resolver_rejects_duplicate_exact_pages() -> None:
-    from playwright_gpt_core.connection import resolve_conversation_page
+    from playwright_api.connection import resolve_conversation_page
 
     context = _Context(
         [
@@ -438,7 +438,7 @@ async def test_exact_page_resolver_rejects_duplicate_exact_pages() -> None:
 
 @pytest.mark.asyncio
 async def test_exact_page_resolver_opens_only_exact_url_when_missing() -> None:
-    from playwright_gpt_core.connection import resolve_conversation_page
+    from playwright_api.connection import resolve_conversation_page
 
     created = _Page("created-target", "about:blank")
     context = _Context(
@@ -466,7 +466,7 @@ async def test_exact_page_resolver_opens_only_exact_url_when_missing() -> None:
 async def test_exact_page_resolver_ignores_noncanonical_candidate(
     unsupported_url: str,
 ) -> None:
-    from playwright_gpt_core.connection import resolve_conversation_page
+    from playwright_api.connection import resolve_conversation_page
 
     unsupported = _Page("unsupported-target", unsupported_url)
     created = _Page("created-target", "about:blank")
@@ -487,7 +487,7 @@ class _WaitPage:
 
 class _WaitBackend:
     async def snapshot(self, _conversation_id: str):
-        from playwright_gpt_core.monitor import MonitorSnapshot
+        from playwright_api.monitor import MonitorSnapshot
 
         return MonitorSnapshot("RUNNING", {"mapping": {}, "current_node": None})
 
@@ -499,7 +499,7 @@ def _frontend_state(
     url: str = "https://chatgpt.com/c/conversation-1",
     composer_text: str = "queued prompt",
 ):
-    from playwright_gpt_core.frontend import FrontendState
+    from playwright_api.frontend import FrontendState
 
     return FrontendState(
         url=url,
@@ -514,9 +514,9 @@ def _frontend_state(
     )
 
 
-def _waiting_core(tmp_path) -> tuple[ChatGPTCore, TurnRecord]:
-    core = ChatGPTCore(
-        CoreConfig(
+def _waiting_core(tmp_path) -> tuple[ChatGPTClient, TurnRecord]:
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="steering-test",
@@ -536,9 +536,9 @@ def _waiting_core(tmp_path) -> tuple[ChatGPTCore, TurnRecord]:
     return core, record
 
 
-def _fresh_waiting_core(tmp_path) -> tuple[ChatGPTCore, TurnRecord]:
-    core = ChatGPTCore(
-        CoreConfig(
+def _fresh_waiting_core(tmp_path) -> tuple[ChatGPTClient, TurnRecord]:
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="fresh-page-test",
@@ -560,7 +560,7 @@ def _fresh_waiting_core(tmp_path) -> tuple[ChatGPTCore, TurnRecord]:
 async def test_active_frontend_with_send_ready_is_one_steering_boundary(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     core, record = _waiting_core(tmp_path)
     observations = 0
@@ -596,7 +596,7 @@ async def test_active_frontend_with_send_ready_is_one_steering_boundary(
 async def test_active_frontend_without_send_waits_and_preserves_exact_prompt(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
+    import playwright_api.service as service_module
 
     core, record = _waiting_core(tmp_path)
     states = iter([_frontend_state(ready=False), _frontend_state(ready=True)])
@@ -629,9 +629,9 @@ async def test_active_frontend_without_send_waits_and_preserves_exact_prompt(
 async def test_preclick_owner_drift_is_invariant_not_owner_wait_timeout(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.cli import EXIT_INVARIANT, exit_code
-    from playwright_gpt_core.errors import OwnershipConflictError
+    import playwright_api.service as service_module
+    from playwright_api.cli import EXIT_INVARIANT, exit_code
+    from playwright_api.errors import OwnershipConflictError
 
     core, record = _waiting_core(tmp_path)
     core.coordination.release("conversation-1", record.request_id, terminal=False)
@@ -670,8 +670,8 @@ async def test_preclick_owner_drift_is_invariant_not_owner_wait_timeout(
 async def test_fresh_send_wait_rejects_same_target_navigation_to_conversation(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import FrontendNotReadyError
+    import playwright_api.service as service_module
+    from playwright_api.errors import FrontendNotReadyError
 
     core, record = _fresh_waiting_core(tmp_path)
 
@@ -706,8 +706,8 @@ async def test_fresh_send_wait_rejects_same_target_navigation_to_conversation(
 async def test_fresh_send_final_preclick_rejects_same_target_navigation_to_conversation(
     tmp_path, monkeypatch
 ) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import FrontendNotReadyError
+    import playwright_api.service as service_module
+    from playwright_api.errors import FrontendNotReadyError
 
     core, record = _fresh_waiting_core(tmp_path)
 
@@ -742,10 +742,10 @@ async def test_fresh_send_final_preclick_rejects_same_target_navigation_to_conve
     ],
 )
 def test_fresh_send_initial_state_rejects_unsupported_page(tmp_path, url) -> None:
-    from playwright_gpt_core.errors import FrontendNotReadyError
+    from playwright_api.errors import FrontendNotReadyError
 
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="fresh-page-test",
@@ -759,8 +759,8 @@ def test_fresh_send_initial_state_rejects_unsupported_page(tmp_path, url) -> Non
 
 @pytest.mark.asyncio
 async def test_get_observer_waits_through_transient_sent_state(tmp_path) -> None:
-    core = ChatGPTCore(
-        CoreConfig(
+    core = ChatGPTClient(
+        ClientConfig(
             state_dir=tmp_path / "state",
             coordination_dir=tmp_path / "coordination",
             deployment_id="get-observer-test",
@@ -768,7 +768,7 @@ async def test_get_observer_waits_through_transient_sent_state(tmp_path) -> None
             poll=0.001,
         )
     )
-    from playwright_gpt_core.models import TurnIdentity
+    from playwright_api.models import TurnIdentity
 
     record = TurnRecord.new(request_id="observer-request", prompt="draft")
     record = record.transition(TurnState.PREPARING).with_identity(
@@ -801,8 +801,8 @@ async def test_get_observer_waits_through_transient_sent_state(tmp_path) -> None
 
 @pytest.mark.asyncio
 async def test_attachment_drift_fails_before_click_boundary(tmp_path, monkeypatch) -> None:
-    import playwright_gpt_core.service as service_module
-    from playwright_gpt_core.errors import FrontendNotReadyError
+    import playwright_api.service as service_module
+    from playwright_api.errors import FrontendNotReadyError
 
     core, record = _waiting_core(tmp_path)
 

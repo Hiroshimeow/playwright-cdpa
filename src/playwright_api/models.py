@@ -434,7 +434,16 @@ class TurnRecord:
             "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "failure": self.failure.to_dict() if self.failure else None,
+            "failure": (
+                {
+                    "category": self.failure.category.value,
+                    "message": self.failure.message,
+                    "retryable": self.failure.retryable,
+                    "external": self.failure.external,
+                }
+                if self.failure
+                else None
+            ),
             "response_sha256": self.response_sha256,
             "response_length": self.response_length,
             "cancellation_requested_at": self.cancellation_requested_at,

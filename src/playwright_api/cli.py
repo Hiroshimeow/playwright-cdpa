@@ -5,11 +5,11 @@ import asyncio
 import sys
 from pathlib import Path
 
-from .config import CoreConfig
+from .config import ClientConfig
 from .errors import CoreError, Failure, FailureCategory, InvalidInputError
 from .models import Result, TurnState
 from .redaction import safe_json_dumps
-from .service import ChatGPTCore
+from .service import ChatGPTClient
 
 EXIT_SUCCESS = 0
 EXIT_INVALID = 2
@@ -28,14 +28,14 @@ def _shared(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--send-timeout", type=float, default=90.0)
     parser.add_argument("--identity-timeout", type=float, default=30.0)
-    parser.add_argument("--state-dir", default=".playwright-gpt")
+    parser.add_argument("--state-dir", default=".playwright-api")
     parser.add_argument("--coordination-dir")
     parser.add_argument("--deployment-id")
     parser.add_argument("--json", action="store_true")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="playwright-gpt")
+    parser = argparse.ArgumentParser(prog="playwright-api")
     sub = parser.add_subparsers(dest="command", required=True)
 
     send = sub.add_parser("send", help="send through the real ChatGPT frontend")
@@ -61,8 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _config(args: argparse.Namespace) -> CoreConfig:
-    return CoreConfig(
+def _config(args: argparse.Namespace) -> ClientConfig:
+    return ClientConfig(
         cdp_endpoint=args.cdp_endpoint,
         state_dir=Path(args.state_dir),
         coordination_dir=(Path(args.coordination_dir) if args.coordination_dir else None),
@@ -75,7 +75,7 @@ def _config(args: argparse.Namespace) -> CoreConfig:
 
 
 async def _run(args: argparse.Namespace) -> Result:
-    core = ChatGPTCore(_config(args))
+    core = ChatGPTClient(_config(args))
     if args.command == "send":
         return await core.send(
             args.prompt,

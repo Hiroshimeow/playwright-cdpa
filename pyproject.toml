@@ -3,21 +3,25 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "playwright-gpt-core"
+name = "playwright-api"
 version = "0.1.0"
 description = "Fail-closed ChatGPT Web execution core for persistent CDP Chromium"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["playwright>=1.52,<2"]
+dependencies = ["playwright>=1.52,<2", "portalocker>=3,<4"]
 
 [project.scripts]
-playwright-gpt = "playwright_gpt_core.cli:main"
+playwright-api = "playwright_api.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.25"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/playwright_gpt_core"]
+packages = ["src/playwright_api"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src/playwright_api", "/README.md", "/pyproject.toml"]
+exclude = ["/.plan", "/dist", "/reference", "/tests", "**/__pycache__", "**/*.pyc"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

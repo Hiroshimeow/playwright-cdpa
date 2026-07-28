@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.backend import AuthenticatedBackend
+from playwright_api.backend import AuthenticatedBackend
 
 
 class Response:
@@ -75,7 +75,7 @@ async def test_snapshot_treats_not_yet_materialized_graph_as_absent() -> None:
 
 @pytest.mark.asyncio
 async def test_backend_5xx_is_external_and_retryable() -> None:
-    from playwright_gpt_core.errors import BackendUnavailableError
+    from playwright_api.errors import BackendUnavailableError
 
     context = Context()
     context.request = UnavailableRequest()

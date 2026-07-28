@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from playwright_gpt_core.frontend import _find_visible, click_send_atomic, observe_frontend
+from playwright_api.frontend import _find_visible, click_send_atomic, observe_frontend
 
 
 class Locator:

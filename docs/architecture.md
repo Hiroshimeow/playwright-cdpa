@@ -2,7 +2,7 @@
 
 ## Public boundary
 
-`ChatGPTCore` is the sole application-facing boundary:
+`ChatGPTClient` is the sole application-facing boundary:
 
 ```text
 send(prompt, fresh|conversation, request_id?) -> Result
@@ -11,7 +11,7 @@ status(request_id)                        -> Result
 cancel(request_id)                        -> Result
 ```
 
-The Python API is authoritative. `playwright-gpt` parses arguments, builds `CoreConfig`, calls one method, and renders the same `Result`/exit taxonomy. Browser transport, graph resolution, persistence, ownership, recovery, and page lifecycle do not live in CLI code.
+The Python API is authoritative. `playwright-api` parses arguments, builds `ClientConfig`, calls one method, and renders the same `Result`/exit taxonomy. Browser transport, graph resolution, persistence, ownership, recovery, and page lifecycle do not live in CLI code.
 
 Caller-supplied request IDs must contain 1-160 ASCII letters, digits, dot, underscore, or hyphen. Only `None` generates a UUID. Every public method validates this before state, coordination, or browser access. No retired command or library aliases are retained.
 
