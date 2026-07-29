@@ -179,11 +179,12 @@ class StateStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, path)
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            if os.name != "nt":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             try:
                 os.unlink(temp_name)

@@ -4,9 +4,29 @@ import json
 
 import pytest
 
+import playwright_api.storage as storage_module
 from playwright_api.errors import CorruptStateError, Failure, FailureCategory
 from playwright_api.models import Result, TurnIdentity, TurnRecord, TurnState
 from playwright_api.storage import StateStore
+
+
+def test_atomic_write_skips_directory_fsync_on_windows(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "windows-state.json"
+    store = StateStore(tmp_path / "state")
+    real_open = storage_module.os.open
+
+    def windows_open(value, flags, mode=0o777, *, dir_fd=None):
+        if value == path.parent:
+            raise PermissionError("Windows cannot open a directory as a file")
+        kwargs = {} if dir_fd is None else {"dir_fd": dir_fd}
+        return real_open(value, flags, mode, **kwargs)
+
+    monkeypatch.setattr(storage_module.os, "name", "nt")
+    monkeypatch.setattr(storage_module.os, "open", windows_open)
+
+    store._atomic_json(path, {"status": "ok"})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"status": "ok"}
 
 
 def test_atomic_round_trip_and_revision(tmp_path) -> None:
