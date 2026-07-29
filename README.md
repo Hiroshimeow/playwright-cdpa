@@ -79,6 +79,30 @@ The executable is `playwright-api`, not the retired `playwright-gpt`. The old `-
 
 If an older checkout returns `local invariant failure: PermissionError` on Windows, pull the latest `feat/playwright-api-sdk` branch and run `uv sync --all-groups` again. Changing `--state-dir` is not the fix for that old build.
 
+## Thin three-agent flow
+
+`main.py` runs one minimal loop: `PLAN -> REVIEW -> DEV -> PLAN`. Only PLAN may return `DONE`.
+
+Continue the ChatGPT conversation used for manual brainstorming:
+
+```text
+uv run main.py --task "Implement the agreed goal" --url-id <conversation-id>
+```
+
+Start PLAN in a new chat:
+
+```text
+uv run main.py --task "Implement the agreed goal"
+```
+
+Create or reuse a ChatGPT Project named `abc` for new role conversations:
+
+```text
+uv run main.py --task "Implement the agreed goal" --project abc
+```
+
+The only workflow flags are `--task`, `--url-id`, and `--project`. Every role writes its report under `.plan/three-agent/` in the repository it works on and returns the exact path to the next role. A two-second pause separates browser operations.
+
 ## Async usage
 
 ```python
