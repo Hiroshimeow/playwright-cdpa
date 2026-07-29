@@ -4,6 +4,15 @@
 
 The Python API is authoritative. The `playwright-api` command is a thin debug adapter. The package is not an HTTP service, MCP server, daemon, scheduler, browser-profile manager, or multi-site framework.
 
+## Runtime status
+
+- Linux: supported and live-tested.
+- Windows: supported by the platform-specific atomic state-write path. The earlier `local invariant failure: PermissionError` caused by POSIX directory `fsync` is fixed on this branch.
+- Python: 3.10 or newer.
+- Browser: an already authenticated Chromium exposed through a loopback CDP endpoint, normally `http://127.0.0.1:9222`.
+
+Native Windows import and persistence behavior is regression-tested. Run the Windows smoke command below after pulling the latest branch; full native Windows browser acceptance remains environment-dependent.
+
 ## Core guarantees
 
 - Uses the real ChatGPT frontend composer, file input, project flow, and Send control.
@@ -23,9 +32,9 @@ Python 3.10 or newer is required.
 Local checkout, non-editable:
 
 ```bash
-uv add /absolute/path/to/playwright-gpt-internal
+uv add /absolute/path/to/playwright-cdpa
 # or
-python -m pip install /absolute/path/to/playwright-gpt-internal
+python -m pip install /absolute/path/to/playwright-cdpa
 ```
 
 Built wheel:
@@ -42,6 +51,33 @@ uv add "playwright-api @ git+<repository-url>@<commit-sha>"
 ```
 
 The Chromium instance must already be authenticated and exposed on a loopback CDP endpoint, normally `http://127.0.0.1:9222`.
+
+### Source-checkout quick start
+
+Linux/macOS shell:
+
+```bash
+git switch feat/playwright-api-sdk
+git pull
+uv sync --all-groups
+uv run playwright-api send "Reply with exactly OK" \
+  --target / \
+  --request-id test-001 \
+  --json
+```
+
+Windows Command Prompt or PowerShell:
+
+```text
+git switch feat/playwright-api-sdk
+git pull
+uv sync --all-groups
+uv run playwright-api send "Reply with exactly OK" --target / --request-id test-win-001 --json
+```
+
+The executable is `playwright-api`, not the retired `playwright-gpt`. The old `--fresh` option was removed; use `--target /` for a fresh root chat.
+
+If an older checkout returns `local invariant failure: PermissionError` on Windows, pull the latest `feat/playwright-api-sdk` branch and run `uv sync --all-groups` again. Changing `--state-dir` is not the fix for that old build.
 
 ## Async usage
 
@@ -132,26 +168,31 @@ if result.disposition == "get_required":
 
 ## CLI
 
+From a source checkout, prefix commands with `uv run`. After installing the wheel, call `playwright-api` directly.
+
 ```bash
-playwright-api send "Reply with exactly OK" \
+uv run playwright-api send "Reply with exactly OK" \
   --target / \
-  --request-id cli-001
+  --request-id cli-001 \
+  --json
 
-playwright-api send "Continue" \
+uv run playwright-api send "Continue" \
   --target /c/<conversation-id> \
-  --request-id cli-002
+  --request-id cli-002 \
+  --json
 
-playwright-api send "Read this file" \
+uv run playwright-api send "Read this file" \
   --target / \
   --attach ./evidence.txt \
-  --request-id cli-003
+  --request-id cli-003 \
+  --json
 
-playwright-api get cli-003
-playwright-api status cli-003 --json
-playwright-api cancel cli-003
+uv run playwright-api get cli-003 --json
+uv run playwright-api status cli-003 --json
+uv run playwright-api cancel cli-003 --json
 ```
 
-The complete CLI command surface is `send`, `get`, `status`, and `cancel`. `status` reads local state only.
+The complete CLI command surface is `send`, `get`, `status`, and `cancel`. `status` reads local state only. There is no `playwright-gpt` executable and no `--fresh` flag.
 
 ## Targets
 
