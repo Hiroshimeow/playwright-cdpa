@@ -235,11 +235,16 @@ async def find_project_frontend(
             "project title",
             5_000,
         )
-        observed_name = str(await title.inner_text()).strip()
-        if not observed_name:
-            raise FrontendNotReadyError("project title is empty")
-        if name is not None and observed_name != name:
-            return None
+        observed_name = ""
+        for attempt in range(41):
+            observed_name = str(await title.inner_text()).strip()
+            if observed_name and (name is None or observed_name == name):
+                break
+            if attempt == 40:
+                if not observed_name:
+                    raise FrontendNotReadyError("project title is empty")
+                return None
+            await page.wait_for_timeout(250)
 
         details = await _find_visible(
             page,
@@ -307,6 +312,7 @@ async def create_project_frontend(
     create_boundary_entered = False
     try:
         await page.goto(f"{ORIGIN}/projects", wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(1_000)
         create_control = await _find_visible(
             page,
             (
@@ -318,6 +324,7 @@ async def create_project_frontend(
             5_000,
         )
         await create_control.evaluate("element => element.click()")
+        await page.wait_for_timeout(1_000)
         name_input = await _find_visible(
             page,
             (
@@ -331,6 +338,7 @@ async def create_project_frontend(
             5_000,
         )
         await name_input.fill(name)
+        await page.wait_for_timeout(1_000)
         if memory_scope is ProjectMemoryScope.PROJECT_ONLY:
             trigger = await _find_visible(
                 page,
@@ -339,6 +347,7 @@ async def create_project_frontend(
                 5_000,
             )
             await trigger.evaluate("element => element.click()")
+            await page.wait_for_timeout(1_000)
             option = await _find_visible(
                 page,
                 (
@@ -350,6 +359,7 @@ async def create_project_frontend(
                 5_000,
             )
             await option.evaluate("element => element.click()")
+            await page.wait_for_timeout(1_000)
         submit = await _find_visible(
             page,
             (
@@ -365,6 +375,7 @@ async def create_project_frontend(
         create_boundary_entered = True
         await submit.evaluate("element => element.click()")
         await page.wait_for_url("**/g/g-p-*/project", timeout=60_000)
+        await page.wait_for_timeout(1_000)
     except PlaywrightTimeoutError as exc:
         if create_boundary_entered:
             raise OperationTimeoutError("project creation outcome is unknown") from exc

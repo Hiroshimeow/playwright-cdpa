@@ -101,7 +101,7 @@ Create or reuse a ChatGPT Project named `abc` for new role conversations:
 uv run main.py --task "Implement the agreed goal" --project abc
 ```
 
-The only workflow flags are `--task`, `--url-id`, and `--project`. Every role writes its report under `.plan/three-agent/` in the repository it works on and returns the exact path to the next role. A two-second pause separates browser operations.
+The only workflow flags are `--task`, `--url-id`, and `--project`. Every role writes its report under `.plan/three-agent/` in the repository it works on and returns the exact path to the next role. Role sends are separated by two seconds; Project creation pauses one second after each UI action.
 
 ## Async usage
 

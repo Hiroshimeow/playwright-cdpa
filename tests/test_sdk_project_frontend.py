@@ -60,6 +60,7 @@ class FakePage:
         self.memory_trigger_clicks = 0
         self.memory_option_clicks = 0
         self.submit_clicks = 0
+        self.waits: list[int] = []
         self.events: list[str] = []
 
     async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
@@ -91,6 +92,9 @@ class FakePage:
         if selector == 'form[data-testid="create-new-project-form"] button[type="submit"]':
             return FakeLocator(visible=self.modal_open, page=self, kind="submit")
         return FakeLocator(visible=False, page=self)
+
+    async def wait_for_timeout(self, milliseconds: int) -> None:
+        self.waits.append(milliseconds)
 
     async def wait_for_url(self, pattern: str, *, timeout: int) -> None:
         assert pattern == "**/g/g-p-*/project"
@@ -137,6 +141,7 @@ async def test_create_project_uses_current_stable_form_contract_and_marks_bounda
     assert page.memory_trigger_clicks == 0
     assert page.memory_option_clicks == 0
     assert page.submit_clicks == 1
+    assert page.waits == [1_000, 1_000, 1_000, 1_000]
 
 
 @pytest.mark.asyncio
@@ -183,6 +188,7 @@ async def test_create_project_opens_exact_memory_scope_selector_before_project_o
     assert page.memory_trigger_clicks == 1
     assert page.memory_option_clicks == 1
     assert page.submit_clicks == 1
+    assert page.waits == [1_000, 1_000, 1_000, 1_000, 1_000, 1_000]
     assert page.events == ["trigger", "option", "boundary", "submit"]
 
 
@@ -236,7 +242,7 @@ class LookupLocator:
 
     async def inner_text(self) -> str:
         assert self.kind == "title"
-        return self.page.project_name
+        return self.page.read_title()
 
     async def evaluate(self, script: str):
         if self.kind == "details":
@@ -265,6 +271,7 @@ class LookupPage:
         project_name: str = "Task Project",
         memory_scope: ProjectMemoryScope = ProjectMemoryScope.DEFAULT,
         selection_counts: list[int] | None = None,
+        title_names: list[str] | None = None,
     ) -> None:
         self.project_id = "g-p-0123456789abcdef0123456789abcdef"
         self.url = "https://chatgpt.com/projects"
@@ -272,6 +279,7 @@ class LookupPage:
         self.project_name = project_name
         self.memory_scope = memory_scope
         self.selection_counts = list(selection_counts or [row_count])
+        self.title_names = list(title_names or [project_name])
         self.details_open = False
         self.settings_open = False
 
@@ -294,6 +302,9 @@ class LookupPage:
 
     async def wait_for_timeout(self, _milliseconds: int) -> None:
         return None
+
+    def read_title(self) -> str:
+        return self.title_names.pop(0) if len(self.title_names) > 1 else self.title_names[0]
 
     async def wait_for_url(self, pattern: str, *, timeout: int) -> None:
         assert pattern == "**/g/g-p-*/project"
@@ -343,6 +354,20 @@ async def test_find_project_waits_for_delayed_exact_row_hydration() -> None:
 
     assert project is not None
     assert project.project_id == page.project_id
+
+
+@pytest.mark.asyncio
+async def test_find_project_waits_for_created_title_hydration() -> None:
+    page = LookupPage(title_names=["Untitled project", "Task Project"])
+
+    project = await find_project_frontend(
+        page,  # type: ignore[arg-type]
+        project_id=page.project_id,
+        name="Task Project",
+    )
+
+    assert project is not None
+    assert project.name == "Task Project"
 
 
 @pytest.mark.asyncio
